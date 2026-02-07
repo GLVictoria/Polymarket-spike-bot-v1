@@ -610,10 +610,10 @@ def fetch_positions_with_retry(max_retries: int = MAX_RETRIES) -> Dict[str, List
     for attempt in range(max_retries):
         try:
             url = f"https://data-api.polymarket.com/positions?user={YOUR_PROXY_WALLET}"
-            logger.info(f"🔄 Fetching positions from {url} (attempt {attempt + 1}/{max_retries})")
+            logger.debug(f"🔄 Fetching positions from {url} (attempt {attempt + 1}/{max_retries})")
             
             response = requests.get(url, timeout=API_TIMEOUT)
-            logger.info(f"📡 API Response Status: {response.status_code}")
+            logger.debug(f"📡 API Response Status: {response.status_code}")
             
             if response.status_code != 200:
                 logger.error(f"❌ API Error: {response.status_code} - {response.text}")
@@ -662,7 +662,7 @@ def fetch_positions_with_retry(max_retries: int = MAX_RETRIES) -> Dict[str, List
                     logger.error(f"Problematic position data: {pos}")
                     continue
             
-            logger.info(f"✅ Successfully fetched {len(positions)} positions")
+            logger.debug(f"✅ Successfully fetched {len(positions)} positions")
             return positions
             
         except requests.RequestException as e:
@@ -1157,7 +1157,7 @@ def update_price_history(state: ThreadSafeState) -> None:
     
     while not state.is_shutdown():
         try:
-            logger.info("🔄 Updating price history")
+            logger.debug("🔄 Updating price history")
             start_time = time.time()
             
             now = time.time()
