@@ -449,9 +449,10 @@ class ThreadSafeState:
     def wait_for_cleanup(self, timeout: Optional[float] = None) -> bool:
         return self._cleanup_complete.wait(timeout)
 
-    def get_price_history(self, asset_id: str) -> deque:
+    def get_price_history(self, asset_id: str) -> list:
         with self._price_history_lock:
-            return self._price_history.get(asset_id, deque())
+            # Return a copy to prevent race conditions during iteration
+            return list(self._price_history.get(asset_id, deque()))
 
     def add_price(self, asset_id: str, timestamp: float, price: float, eventslug: str, outcome: str) -> None:
         with self._price_history_lock:
@@ -460,6 +461,11 @@ class ThreadSafeState:
             if asset_id not in self._price_history:
                 self._price_history[asset_id] = deque(maxlen=self._max_price_history_size)
             self._price_history[asset_id].append((timestamp, price, eventslug, outcome))
+
+    def get_tracked_asset_ids(self) -> list:
+        """Get a copy of all tracked asset IDs for thread-safe iteration"""
+        with self._price_history_lock:
+            return list(self._price_history.keys())
 
     def get_active_trades(self) -> Dict[str, TradeInfo]:
         with self._active_trades_lock:
@@ -859,12 +865,16 @@ def place_buy_order(state: ThreadSafeState, asset: str, reason: str) -> bool:
 
         # Check maximum concurrent trades
         active_trades = state.get_active_trades()
-        logger.info(f"active_trades----------------------------------------------->{active_trades}")
+        logger.debug(f"Active trades: {active_trades}")
         if len(active_trades) >= MAX_CONCURRENT_TRADES:
             logger.warning(f"🔒 Maximum concurrent trades limit reached ({len(active_trades)}/{MAX_CONCURRENT_TRADES})")
             return False
 
         # Check USDC balance and calculate position size
+        if YOUR_PROXY_WALLET is None:
+            logger.error("❌ Cannot check USDC balance: wallet not configured")
+            return False
+            
         usdc_contract = web3.eth.contract(address=USDC_CONTRACT_ADDRESS, abi=[
             {"constant": True, "inputs": [{"name": "account", "type": "address"}],
              "name": "balanceOf", "outputs": [{"name": "", "type": "uint256"}],
@@ -1297,7 +1307,8 @@ def detect_and_trade(state: ThreadSafeState) -> None:
                 price_update_event.clear()
                 
                 # Ensure we have some price history before proceeding
-                if not any(state.get_price_history(asset_id) for asset_id in state._price_history.keys()):
+                tracked_assets = state.get_tracked_asset_ids()
+                if not any(state.get_price_history(asset_id) for asset_id in tracked_assets):
                     logger.debug("⏳ Waiting for price history to be populated...")
                     continue
                 
@@ -1310,7 +1321,7 @@ def detect_and_trade(state: ThreadSafeState) -> None:
                     logger.info(f"🔍 Scanning Markets | Scan #{scan_count} | Active Positions: {len(positions_copy)}")
                     last_log_time = current_time
                 
-                for asset_id in list(state._price_history.keys()):
+                for asset_id in tracked_assets:
                     try:
                         history = state.get_price_history(asset_id)
                         # Need at least 5 price points for spike detection
@@ -1412,16 +1423,12 @@ def check_trade_exits(state: ThreadSafeState) -> None:
                     cash_profit = (current_price - avg_price) * remaining_shares
                     pct_profit = (current_price - avg_price) / avg_price
                     
-                    # Track if we sold so we don't check multiple conditions
-                    trade_exited = False
-
                     # Check holding time limit FIRST
                     if current_time - last_traded > HOLDING_TIME_LIMIT:
                         logger.info(f"⏰ Holding Time Limit Hit | Asset: {asset_id} | Holding Time: {current_time - last_traded:.2f} seconds | Time: {time.strftime('%Y-%m-%d %H:%M:%S')}")
                         if place_sell_order(state, asset_id, "Holding time limit"):
                             state.remove_active_trade(asset_id)
                             state.set_last_trade_time(time.time())
-                        trade_exited = True
                     
                     # Check take profit (use elif to avoid double-sell)
                     elif cash_profit >= CASH_PROFIT or pct_profit > PCT_PROFIT:
@@ -1429,7 +1436,6 @@ def check_trade_exits(state: ThreadSafeState) -> None:
                         if place_sell_order(state, asset_id, "Take profit"):
                             state.remove_active_trade(asset_id)
                             state.set_last_trade_time(time.time())
-                        trade_exited = True
 
                     # Check stop loss (use elif to avoid double-sell)
                     elif cash_profit <= CASH_LOSS or pct_profit < PCT_LOSS:
@@ -1437,7 +1443,6 @@ def check_trade_exits(state: ThreadSafeState) -> None:
                         if place_sell_order(state, asset_id, "Stop loss"):
                             state.remove_active_trade(asset_id)
                             state.set_last_trade_time(time.time())
-                        trade_exited = True
 
 
                 except Exception as e:
