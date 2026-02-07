@@ -12,32 +12,44 @@ A real-time trading bot for Polymarket that detects price spikes and executes tr
 - 🐳 **Docker Ready** - Simple one-command deployment
 - 🔒 **Secure** - Private keys are handled securely and never exposed in logs
 
-## Prerequisites
+## Installation & Setup
 
-Before you start, make sure you have Docker installed:
+### 1. Install Prerequisites
 
-1. **Download Docker Desktop**: [https://www.docker.com/products/docker-desktop/](https://www.docker.com/products/docker-desktop/)
-2. **Install & Run**: Follow the installer instructions and ensure Docker Desktop is running in the background.
+**Docker Desktop** (Required)
+1. Download from [Docker's official site](https://www.docker.com/products/docker-desktop/).
+2. Run the installer and follow the on-screen instructions.
+3. **Important**: After installing, open **Docker Desktop** app and let it start up. You should see a green status indicator in the app.
 
-## Quick Start (Recommended)
+**Git** (Recommended)
+1. Download from [git-scm.com](https://git-scm.com/downloads).
+2. Install with default settings.
 
-The easiest way to run the bot is using Docker. This ensures a consistent environment and automatic restarts.
+### 2. Download the Bot
+Open your terminal (Command Prompt, PowerShell, or Terminal) and run:
 
-### 1. Start the Bot
-Run the following command in the project directory:
+```bash
+git clone https://github.com/GLVictoria/Polymarket-spike-bot-v1.git
+cd Polymarket-spike-bot-v1
+```
+
+*(Alternatively, download the ZIP file from GitHub, extract it, and open a terminal in that folder)*
+
+### 3. Start the Bot
+In your terminal, inside the project folder, run:
 
 ```bash
 docker-compose up -d
 ```
+*This will download necessary files and start the bot in the background.*
 
-### 2. Configure via Dashboard
-Open your browser to **http://localhost:5000/settings**
-
-1. Enter your **Private Key**, **Proxy Wallet**, and **Trader Address**
-2. Adjust trading parameters (optional)
+### 4. Configure via Dashboard
+Once the bot is running:
+1. Open your browser to **http://localhost:5000/settings**
+2. Enter your **Private Key**, **Proxy Wallet**, and **Trader Address**
 3. Click **Save Settings**
 
-The bot will automatically detect the configuration and start trading! 🚀
+The bot is now active and trading! 🚀
 
 ### 3. Monitor
 Go to **http://localhost:5000** to see:
