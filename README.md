@@ -12,6 +12,13 @@ A real-time trading bot for Polymarket that detects price spikes and executes tr
 - 🐳 **Docker Ready** - Simple one-command deployment
 - 🔒 **Secure** - Private keys are handled securely and never exposed in logs
 
+## Prerequisites
+
+Before you start, make sure you have Docker installed:
+
+1. **Download Docker Desktop**: [https://www.docker.com/products/docker-desktop/](https://www.docker.com/products/docker-desktop/)
+2. **Install & Run**: Follow the installer instructions and ensure Docker Desktop is running in the background.
+
 ## Quick Start (Recommended)
 
 The easiest way to run the bot is using Docker. This ensures a consistent environment and automatic restarts.
