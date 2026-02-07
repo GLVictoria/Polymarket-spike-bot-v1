@@ -630,6 +630,7 @@ def initialize_clob_client(max_retries: int = 3) -> ClobClient:
     raise RuntimeError("Failed to initialize ClobClient after maximum retries")
 
 client = None
+client_lock = threading.Lock()  # Protect client access across threads
 
 # API functions with retry mechanism
 def fetch_positions_with_retry(max_retries: int = MAX_RETRIES) -> Dict[str, List[PositionInfo]]:
@@ -764,54 +765,69 @@ def ensure_usdc_allowance(required_amount: float) -> bool:
 
 def refresh_api_credentials() -> bool:
     """Refresh API credentials with proper error handling"""
-    try:
-        api_creds = client.create_or_derive_api_creds()
-        client.set_api_creds(api_creds)
-        logger.info("✅ API credentials refreshed successfully")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Failed to refresh API credentials: {str(e)}")
-        return False
+    global client
+    with client_lock:
+        if client is None:
+            logger.error("❌ Cannot refresh credentials: client not initialized")
+            return False
+        try:
+            api_creds = client.create_or_derive_api_creds()
+            client.set_api_creds(api_creds)
+            logger.info("✅ API credentials refreshed successfully")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to refresh API credentials: {str(e)}")
+            return False
 
 def get_min_ask_data(asset: str) -> Optional[Dict[str, Any]]:
-    try:
-        order = client.get_order_book(asset)
-        if order.asks:
-            buy_price = client.get_price(asset, "BUY")
-            min_ask_price = order.asks[-1].price
-            min_ask_size = order.asks[-1].size
-            logger.info(f"min_ask_price: {min_ask_price}, min_ask_size: {min_ask_size}")
-            return {
-                "buy_price": buy_price,
-                "min_ask_price": min_ask_price,
-                "min_ask_size": min_ask_size
-            }
-        else:
-            logger.error(f"❌ No ask data found for {asset}")
+    global client
+    with client_lock:
+        if client is None:
+            logger.error("❌ Cannot get ask data: client not initialized")
             return None
-    except Exception as e:
-        logger.error(f"❌ Failed to get ask data for {asset}: {str(e)}")
-        return None
+        try:
+            order = client.get_order_book(asset)
+            if order.asks:
+                buy_price = client.get_price(asset, "BUY")
+                min_ask_price = order.asks[-1].price
+                min_ask_size = order.asks[-1].size
+                logger.info(f"min_ask_price: {min_ask_price}, min_ask_size: {min_ask_size}")
+                return {
+                    "buy_price": buy_price,
+                    "min_ask_price": min_ask_price,
+                    "min_ask_size": min_ask_size
+                }
+            else:
+                logger.error(f"❌ No ask data found for {asset}")
+                return None
+        except Exception as e:
+            logger.error(f"❌ Failed to get ask data for {asset}: {str(e)}")
+            return None
 
 def get_max_bid_data(asset: str) -> Optional[Dict[str, Any]]:
-    try:
-        order = client.get_order_book(asset)
-        if order.bids:
-            sell_price = client.get_price(asset, "SELL")
-            max_bid_price = order.bids[-1].price
-            max_bid_size = order.bids[-1].size
-            logger.info(f"max_bid_price: {max_bid_price}, max_bid_size: {max_bid_size}")
-            return {
-                "sell_price": sell_price,
-                "max_bid_price": max_bid_price,
-                "max_bid_size": max_bid_size
-            }
-        else:
-            logger.error(f"❌ No bid data found for {asset}")
+    global client
+    with client_lock:
+        if client is None:
+            logger.error("❌ Cannot get bid data: client not initialized")
             return None
-    except Exception as e:
-        logger.error(f"❌ Failed to get bid data for {asset}: {str(e)}")
-        return None
+        try:
+            order = client.get_order_book(asset)
+            if order.bids:
+                sell_price = client.get_price(asset, "SELL")
+                max_bid_price = order.bids[-1].price
+                max_bid_size = order.bids[-1].size
+                logger.info(f"max_bid_price: {max_bid_price}, max_bid_size: {max_bid_size}")
+                return {
+                    "sell_price": sell_price,
+                    "max_bid_price": max_bid_price,
+                    "max_bid_size": max_bid_size
+                }
+            else:
+                logger.error(f"❌ No bid data found for {asset}")
+                return None
+        except Exception as e:
+            logger.error(f"❌ Failed to get bid data for {asset}: {str(e)}")
+            return None
 
 def check_usdc_balance(usdc_needed: float) -> bool:
     try:
@@ -916,8 +932,14 @@ def place_buy_order(state: ThreadSafeState, asset: str, reason: str) -> bool:
                     amount=float(amount_in_dollars),
                     side=BUY,
                 )
-                signed_order = client.create_market_order(order_args)
-                response = client.post_order(signed_order, OrderType.FOK)
+                
+                global client
+                with client_lock:
+                    if client is None:
+                        logger.error("❌ Cannot place order: client not initialized")
+                        return False
+                    signed_order = client.create_market_order(order_args)
+                    response = client.post_order(signed_order, OrderType.FOK)
                 if response.get("success"):
                     filled = response.get("data", {}).get("filledAmount", amount_in_dollars)
                     logger.info(f"🛒 [{reason}] Order placed: BUY {filled:.4f} shares of {asset} at ${min_ask_price:.4f}")
@@ -1043,8 +1065,14 @@ def place_sell_order(state: ThreadSafeState, asset: str, reason: str) -> bool:
                     amount=float(sell_amount_in_shares),
                     side=SELL,
                 )
-                signed_order = client.create_market_order(order_args)
-                response = client.post_order(signed_order, OrderType.FOK)
+                
+                global client
+                with client_lock:
+                    if client is None:
+                        logger.error("❌ Cannot place order: client not initialized")
+                        return False
+                    signed_order = client.create_market_order(order_args)
+                    response = client.post_order(signed_order, OrderType.FOK)
                 if response.get("success"):
                     filled = response.get("data", {}).get("filledAmount", sell_amount_in_shares)
                     logger.info(f"🛒 [{reason}] Order placed: SELL {filled:.4f} shares of {asset}")
@@ -1550,21 +1578,14 @@ def cleanup(state: ThreadSafeState) -> None:
         
         # Wait for threads to finish with timeout
         for thread in threading.enumerate():
-            if thread != threading.current_thread():
+            if thread != threading.current_thread() and thread.name != "MainThread":
                 thread.join(timeout=5)
                 if thread.is_alive():
                     logger.warning(f"Thread {thread.name} did not finish in time")
-                    # Force terminate the thread if it's still alive
-                    if hasattr(thread, '_stop'):
-                        thread._stop()
+                    # Note: Cannot force-stop threads in Python, they must cooperate via shutdown flag
         
-        # Close any open connections
-        try:
-            # The ClobClient doesn't have a close method, so we just set it to None
-            global client
-            client = None
-        except Exception as e:
-            logger.error(f"Error closing client connection: {e}")
+        # Note: Keep client alive until threads are done
+        # Setting to None here would cause race conditions
         
         # Wait for cleanup to complete
         if not state.wait_for_cleanup(timeout=10):
