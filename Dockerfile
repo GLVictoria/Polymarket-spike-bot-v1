@@ -23,7 +23,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Create logs directory
-RUN mkdir -p logs
+RUN mkdir -p logs config
+
+# Copy entrypoint script and make executable
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
 # Expose dashboard port
 EXPOSE 5000
@@ -32,5 +36,5 @@ EXPOSE 5000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:5000/api/status || exit 1
 
-# Run the bot
-CMD ["python", "-u", "main.py"]
+# Run the bot via entrypoint
+ENTRYPOINT ["/app/entrypoint.sh"]

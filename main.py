@@ -87,7 +87,15 @@ THREAD_RESTART_DELAY = 2        # Delay before restarting a thread
 MAX_SPREAD = 0.10               # Maximum allowed spread (10%)
 
 # Load and validate environment variables
-load_dotenv(".env")
+# Check config directory first (Docker mount), then fallback to .env
+import os as _os
+_config_env = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'config', '.env')
+if _os.path.isfile(_config_env):
+    load_dotenv(_config_env)
+elif _os.path.isfile("/app/config/.env"):
+    load_dotenv("/app/config/.env")
+else:
+    load_dotenv(".env")
 
 # Configuration validation
 def validate_config() -> None:
@@ -1582,7 +1590,13 @@ def main() -> None:
                 time.sleep(2)
                 # Reload env to check if user saved settings
                 from dotenv import load_dotenv
-                load_dotenv(override=True)
+                _config_env = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', '.env')
+                if os.path.isfile(_config_env):
+                    load_dotenv(_config_env, override=True)
+                elif os.path.isfile("/app/config/.env"):
+                    load_dotenv("/app/config/.env", override=True)
+                else:
+                    load_dotenv(override=True)
                 
                 # Re-validate
                 valid, error = validate_config()

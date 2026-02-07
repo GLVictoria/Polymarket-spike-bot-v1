@@ -220,7 +220,10 @@ def api_logs():
 
 
 # Settings configuration
-ENV_FILE_PATH = '.env'
+# Use config directory for Docker volume mount (prevents directory creation issue)
+import os
+CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config')
+ENV_FILE_PATH = os.path.join(CONFIG_DIR, '.env') if os.path.isdir(CONFIG_DIR) else '.env'
 SETTINGS_SCHEMA = {
     'wallet': {
         'PK': {'label': 'Private Key', 'type': 'password', 'required': True},
@@ -264,10 +267,12 @@ def read_env_file() -> Dict[str, str]:
     """Read .env file and return as dictionary"""
     import os
     
-    # Try multiple possible locations
+    # Try multiple possible locations (config dir first for Docker)
     possible_paths = [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), ENV_FILE_PATH),
-        os.path.abspath(ENV_FILE_PATH),
+        "/app/config/.env",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', '.env'),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'),
+        os.path.abspath('.env'),
         "/app/.env"
     ]
     
@@ -275,7 +280,7 @@ def read_env_file() -> Dict[str, str]:
     env_path = None
     
     for path in possible_paths:
-        if os.path.exists(path):
+        if os.path.isfile(path):  # Check it's a file, not directory
             env_path = path
             break
             
@@ -300,22 +305,28 @@ def write_env_file(settings: Dict[str, str]) -> bool:
     """Write settings to .env file"""
     import os
     
-    # Try multiple possible locations
+    # Try multiple possible locations (config dir first for Docker)
     possible_paths = [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), ENV_FILE_PATH),
-        os.path.abspath(ENV_FILE_PATH),
+        "/app/config/.env",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', '.env'),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'),
+        os.path.abspath('.env'),
         "/app/.env"
     ]
     
     env_path = None
     for path in possible_paths:
-        if os.path.exists(path):
+        if os.path.isfile(path):  # Check it's a file, not directory
             env_path = path
             break
-            
-    # If not found, create in dashboard directory (safer than CWD)
+    
+    # If not found, create in config directory (preferred) or app directory
     if not env_path:
-        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ENV_FILE_PATH)
+        config_dir = "/app/config" if os.path.isdir("/app/config") else os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config')
+        if os.path.isdir(config_dir):
+            env_path = os.path.join(config_dir, '.env')
+        else:
+            env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
     
     print(f"Saving settings to: {env_path}")
     
@@ -324,7 +335,7 @@ def write_env_file(settings: Dict[str, str]) -> bool:
         lines = []
         found_keys = set()
         
-        if os.path.exists(env_path):
+        if os.path.isfile(env_path):
             with open(env_path, 'r') as f:
                 for line in f:
                     stripped = line.strip()

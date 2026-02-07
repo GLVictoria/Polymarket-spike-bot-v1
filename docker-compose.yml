@@ -4,10 +4,10 @@ services:
     container_name: polyspike-bot
     restart: unless-stopped
     ports:
-      - "5000:5000"
+      - "5001:5000"
     volumes:
-      # Mount .env file (keep secrets out of image)
-      - ./.env:/app/.env
+      # Mount config directory (avoids Docker creating .env as directory if missing)
+      - ./config:/app/config
       # Persist logs
       - ./logs:/app/logs
     environment:
