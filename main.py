@@ -129,8 +129,26 @@ def validate_config() -> None:
         try:
             if var_type == float:
                 float(value)
+            elif var_type == int:
+                int(value)
             elif var_type == str:
-                str(value)
+                # Additional validation for specific variables
+                if var == "PK":
+                    # Check if private key is valid hex (with or without 0x prefix)
+                    pk = value.strip()
+                    if pk.startswith('0x'):
+                        pk = pk[2:]
+                    # Should be 64 hex characters
+                    if len(pk) != 64 or not all(c in '0123456789abcdefABCDEF' for c in pk):
+                        invalid.append(var)
+                        continue
+                elif var in ["YOUR_PROXY_WALLET", "BOT_TRADER_ADDRESS", "USDC_CONTRACT_ADDRESS", "POLYMARKET_SETTLEMENT_CONTRACT"]:
+                    # Check if address is valid format
+                    try:
+                        Web3.to_checksum_address(value)
+                    except Exception:
+                        invalid.append(var)
+                        continue
         except ValueError:
             invalid.append(var)
     
@@ -1617,6 +1635,10 @@ def main() -> None:
             logger.info("✅ CLOB Client initialized successfully")
         except Exception as e:
             logger.error(f"❌ Critical error initializing CLOB client: {e}")
+            logger.error("⚠️ Bot will run in dashboard-only mode. Please fix configuration and restart.")
+            # Keep dashboard running but don't start trading
+            while not state.is_shutdown():
+                time.sleep(1)
             return
 
         thread_manager = ThreadManager(state)
