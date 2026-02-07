@@ -307,6 +307,8 @@ class ThreadSafeState:
         self._shutdown_event = Event()
         self._cleanup_complete = Event()
         self._circuit_breaker_lock = Lock()
+        self._paused_lock = Lock()
+        self._paused = False
         
         self._max_price_history_size = max_price_history_size
         self._keep_min_shares = keep_min_shares
@@ -538,6 +540,17 @@ class ThreadSafeState:
     # def update_daily_pnl(self, pnl: float) -> None:
     #     with self._circuit_breaker_lock:
     #         self._daily_pnl += pnl
+
+    def toggle_pause(self) -> bool:
+        """Toggle pause state. Returns new state."""
+        with self._paused_lock:
+            self._paused = not self._paused
+            return self._paused
+
+    def is_paused(self) -> bool:
+        """Check if bot is paused"""
+        with self._paused_lock:
+            return self._paused
     #         logger.info(f"📊 Daily PnL updated: ${self._daily_pnl:.2f}")
             
     #         # Check circuit breaker conditions
@@ -1216,6 +1229,14 @@ def detect_and_trade(state: ThreadSafeState) -> None:
     scan_count = 0
     
     while not state.is_shutdown():
+        # Check if paused
+        if state.is_paused():
+            # Log only once every 30 seconds
+            if time.time() - last_log_time >= 30:
+                logger.info("⏸️ Bot is PAUSED. Scanning skipped.")
+                last_log_time = time.time()
+            time.sleep(1)
+            continue
         try:
             # Wait for price update with timeout
             if price_update_event.wait(timeout=1.0):

@@ -102,6 +102,7 @@ def api_status():
     positions = _bot_state.get_positions()
     
     return jsonify({
+        'paused': _bot_state.is_paused(),
         'running': not _bot_state.is_shutdown(),
         'uptime': f'{hours:02d}:{minutes:02d}:{seconds:02d}',
         'active_trades': len(active_trades),
@@ -460,6 +461,16 @@ def api_restart():
         
     threading.Thread(target=restart_process).start()
     return jsonify({'success': True, 'message': 'Bot restarting...'})
+
+@app.route('/api/pause', methods=['POST'])
+def api_pause():
+    """Toggle bot pause state"""
+    if _bot_state is None:
+        return jsonify({'error': 'Bot not initialized'}), 503
+    
+    new_state = _bot_state.toggle_pause()
+    status = "PAUSED" if new_state else "RUNNING"
+    return jsonify({'success': True, 'paused': new_state, 'message': f'Bot is now {status}'})
 
 
 # Price update emitter (call this from main bot)

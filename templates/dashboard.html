@@ -296,6 +296,18 @@
             word-break: break-word;
         }
 
+        /* Status Badge Variants */
+        .status-badge.paused {
+            background: rgba(245, 158, 11, 0.1);
+            color: #fbbf24;
+            border: 1px solid rgba(245, 158, 11, 0.2);
+        }
+
+        .status-dot.paused {
+            background: #fbbf24;
+            box-shadow: 0 0 8px rgba(245, 158, 11, 0.4);
+        }
+
         /* Trade badges */
         .badge {
             display: inline-block;
@@ -360,6 +372,10 @@
                 <h1>PolySpike Dashboard</h1>
             </div>
             <div style="display: flex; align-items: center; gap: 16px;">
+                <button id="pauseBtn" onclick="togglePause()"
+                    style="color: var(--text-secondary); background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; font-size: 0.875rem; padding: 8px 16px; cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                    ⏸️ Pause
+                </button>
                 <button onclick="restartBot()"
                     style="color: var(--text-secondary); background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; font-size: 0.875rem; padding: 8px 16px; cursor: pointer; display: flex; align-items: center; gap: 6px;">
                     🔄 Restart
@@ -600,13 +616,23 @@
                 const dot = badge.querySelector('.status-dot');
 
                 if (data.running) {
-                    badge.className = 'status-badge running';
-                    dot.className = 'status-dot running';
-                    text.textContent = 'Running';
+                    if (data.paused) {
+                        badge.className = 'status-badge paused';
+                        dot.className = 'status-dot paused';
+                        text.textContent = 'Paused';
+                        document.getElementById('pauseBtn').innerHTML = '▶️ Resume';
+                    } else {
+                        badge.className = 'status-badge running';
+                        dot.className = 'status-dot running';
+                        text.textContent = 'Running';
+                        document.getElementById('pauseBtn').innerHTML = '⏸️ Pause';
+                    }
                 } else {
                     badge.className = 'status-badge stopped';
                     dot.className = 'status-dot stopped';
                     text.textContent = 'Stopped';
+                    document.getElementById('pauseBtn').innerHTML = '⏸️ Pause';
+                    document.getElementById('pauseBtn').disabled = true;
                 }
             } catch (e) {
                 console.error('Failed to fetch status:', e);
@@ -758,6 +784,30 @@
                 alert('Failed to request restart. Check logs.');
                 btn.innerHTML = originalText;
                 btn.disabled = false;
+            }
+        }
+
+        async function togglePause() {
+            const btn = document.getElementById('pauseBtn');
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '⏳ ...';
+            btn.disabled = true;
+
+            try {
+                const res = await fetch('/api/pause', { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    // Update will happen on next status fetch
+                    fetchStatus();
+                } else {
+                    alert('Failed: ' + (data.error || 'Unknown error'));
+                }
+            } catch (e) {
+                console.error('Pause toggle failed:', e);
+                alert('Failed to toggle pause. Check logs.');
+            } finally {
+                btn.disabled = false;
+                // Text will be updated by fetchStatus
             }
         }
     </script>
