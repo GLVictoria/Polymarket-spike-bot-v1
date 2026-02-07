@@ -1,6 +1,8 @@
-requests==2.31.0
-python-dotenv==1.0.1
-web3==5.31.3
-py-clob-client==0.1.0
-halo
-
+requests>=2.31.0
+python-dotenv>=1.0.0
+web3>=6.0.0
+py-clob-client>=0.1.0
+halo>=0.0.31
+colorlog>=6.7.0
+flask>=3.0.0
+flask-socketio>=5.3.0

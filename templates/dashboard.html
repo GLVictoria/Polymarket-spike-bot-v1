@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PolySpike Dashboard</title>
+    <script src="https://cdn.socket.io/4.6.0/socket.io.min.js"></script>
+    <style>
+        :root {
+            --bg-primary: #0a0e17;
+            --bg-secondary: #111827;
+            --bg-card: #1f2937;
+            --accent: #10b981;
+            --accent-hover: #059669;
+            --text-primary: #f9fafb;
+            --text-secondary: #9ca3af;
+            --text-muted: #6b7280;
+            --border: #374151;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+            --success: #10b981;
+            --info: #3b82f6;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            line-height: 1.5;
+        }
+
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        /* Header */
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 0;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 24px;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo h1 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--accent), #34d399);
+            background-clip: text;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 0.875rem;
+            font-weight: 500;
+        }
+
+        .status-badge.running {
+            background: rgba(16, 185, 129, 0.15);
+            color: var(--success);
+        }
+
+        .status-badge.stopped {
+            background: rgba(239, 68, 68, 0.15);
+            color: var(--danger);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        .status-dot.running {
+            background: var(--success);
+        }
+
+        .status-dot.stopped {
+            background: var(--danger);
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        /* Stats Grid */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .stat-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px;
+            transition: transform 0.2s, border-color 0.2s;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-2px);
+            border-color: var(--accent);
+        }
+
+        .stat-label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            margin-bottom: 4px;
+        }
+
+        .stat-value {
+            font-size: 1.75rem;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        .stat-value.positive {
+            color: var(--success);
+        }
+
+        .stat-value.negative {
+            color: var(--danger);
+        }
+
+        /* Main Grid */
+        .main-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        @media (max-width: 1200px) {
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Cards */
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg-secondary);
+        }
+
+        .card-title {
+            font-size: 0.875rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-secondary);
+        }
+
+        .card-body {
+            padding: 16px 20px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th,
+        td {
+            padding: 10px 12px;
+            text-align: left;
+            font-size: 0.8125rem;
+        }
+
+        th {
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            font-size: 0.6875rem;
+            letter-spacing: 0.05em;
+        }
+
+        tr {
+            border-bottom: 1px solid var(--border);
+        }
+
+        tr:last-child {
+            border-bottom: none;
+        }
+
+        tr:hover {
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .positive {
+            color: var(--success);
+        }
+
+        .negative {
+            color: var(--danger);
+        }
+
+        /* Logs */
+        .logs-container {
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.75rem;
+            line-height: 1.8;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .log-entry {
+            padding: 4px 8px;
+            border-radius: 4px;
+            margin-bottom: 2px;
+            display: flex;
+            gap: 12px;
+        }
+
+        .log-entry:hover {
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        .log-time {
+            color: var(--text-muted);
+            flex-shrink: 0;
+        }
+
+        .log-level {
+            font-weight: 600;
+            flex-shrink: 0;
+            width: 60px;
+        }
+
+        .log-level.INFO {
+            color: var(--info);
+        }
+
+        .log-level.WARNING {
+            color: var(--warning);
+        }
+
+        .log-level.ERROR {
+            color: var(--danger);
+        }
+
+        .log-level.DEBUG {
+            color: var(--text-muted);
+        }
+
+        .log-message {
+            color: var(--text-secondary);
+            word-break: break-word;
+        }
+
+        /* Trade badges */
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.6875rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .badge-buy {
+            background: rgba(16, 185, 129, 0.15);
+            color: var(--success);
+        }
+
+        .badge-sell {
+            background: rgba(239, 68, 68, 0.15);
+            color: var(--danger);
+        }
+
+        /* Empty state */
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: var(--text-muted);
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--bg-secondary);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 3px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--text-muted);
+        }
+
+        /* Full width cards */
+        .full-width {
+            grid-column: 1 / -1;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header>
+            <div class="logo">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    style="color: var(--accent)">
+                    <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path>
+                </svg>
+                <h1>PolySpike Dashboard</h1>
+            </div>
+            <div style="display: flex; align-items: center; gap: 16px;">
+                <a href="/settings"
+                    style="color: var(--text-secondary); text-decoration: none; padding: 8px 16px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; font-size: 0.875rem;">⚙️
+                    Settings</a>
+                <div id="status-badge" class="status-badge stopped">
+                    <span class="status-dot stopped"></span>
+                    <span id="status-text">Connecting...</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Stats -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">Uptime</div>
+                <div class="stat-value" id="uptime">--:--:--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Active Trades</div>
+                <div class="stat-value" id="active-trades">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Tracked Assets</div>
+                <div class="stat-value" id="tracked-assets">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Total Positions</div>
+                <div class="stat-value" id="positions-count">0</div>
+            </div>
+        </div>
+
+        <!-- Main Grid -->
+        <div class="main-grid">
+            <!-- Active Trades -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">📈 Active Trades</span>
+                </div>
+                <div class="card-body">
+                    <table id="trades-table">
+                        <thead>
+                            <tr>
+                                <th>Asset</th>
+                                <th>Entry</th>
+                                <th>Current</th>
+                                <th>PnL</th>
+                                <th>Time</th>
+                            </tr>
+                        </thead>
+                        <tbody id="trades-body">
+                            <tr>
+                                <td colspan="5" class="empty-state">No active trades</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Positions -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">💼 Positions</span>
+                </div>
+                <div class="card-body">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Event</th>
+                                <th>Outcome</th>
+                                <th>Shares</th>
+                                <th>Price</th>
+                                <th>PnL</th>
+                            </tr>
+                        </thead>
+                        <tbody id="positions-body">
+                            <tr>
+                                <td colspan="5" class="empty-state">No positions</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Price Monitor -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">💰 Price Monitor</span>
+                </div>
+                <div class="card-body">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Event</th>
+                                <th>Outcome</th>
+                                <th>Price</th>
+                                <th>Change</th>
+                            </tr>
+                        </thead>
+                        <tbody id="prices-body">
+                            <tr>
+                                <td colspan="4" class="empty-state">No price data</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Trade History -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">📋 Trade History</span>
+                </div>
+                <div class="card-body">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Type</th>
+                                <th>Asset</th>
+                                <th>Price</th>
+                                <th>Reason</th>
+                            </tr>
+                        </thead>
+                        <tbody id="history-body">
+                            <tr>
+                                <td colspan="5" class="empty-state">No trade history</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Logs -->
+            <div class="card full-width">
+                <div class="card-header">
+                    <span class="card-title">📝 Live Logs</span>
+                    <button onclick="clearLogs()"
+                        style="background: var(--border); border: none; color: var(--text-secondary); padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 0.75rem;">Clear</button>
+                </div>
+                <div class="card-body logs-container" id="logs-container">
+                    <div class="empty-state">Waiting for logs...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Socket.IO connection
+        const socket = io('/dashboard');
+        let logsStarted = false;
+
+        socket.on('connect', () => {
+            console.log('Connected to dashboard');
+            updateStatusBadge(true);
+        });
+
+        socket.on('disconnect', () => {
+            console.log('Disconnected from dashboard');
+            updateStatusBadge(false);
+        });
+
+        socket.on('log', (data) => {
+            addLogEntry(data);
+        });
+
+        socket.on('trade', (data) => {
+            fetchHistory();
+        });
+
+        // Update status badge
+        function updateStatusBadge(connected) {
+            const badge = document.getElementById('status-badge');
+            const text = document.getElementById('status-text');
+            const dot = badge.querySelector('.status-dot');
+
+            if (connected) {
+                badge.className = 'status-badge running';
+                dot.className = 'status-dot running';
+                text.textContent = 'Connected';
+            } else {
+                badge.className = 'status-badge stopped';
+                dot.className = 'status-dot stopped';
+                text.textContent = 'Disconnected';
+            }
+        }
+
+        // Add log entry
+        function addLogEntry(log) {
+            const container = document.getElementById('logs-container');
+            if (!logsStarted) {
+                container.innerHTML = '';
+                logsStarted = true;
+            }
+
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.innerHTML = `
+                <span class="log-time">${log.timestamp}</span>
+                <span class="log-level ${log.level}">${log.level}</span>
+                <span class="log-message">${escapeHtml(log.message)}</span>
+            `;
+            container.appendChild(entry);
+            container.scrollTop = container.scrollHeight;
+
+            // Keep only last 200 logs
+            while (container.children.length > 200) {
+                container.removeChild(container.firstChild);
+            }
+        }
+
+        function clearLogs() {
+            document.getElementById('logs-container').innerHTML = '<div class="empty-state">Logs cleared</div>';
+            logsStarted = false;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Fetch status
+        async function fetchStatus() {
+            try {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+
+                document.getElementById('uptime').textContent = data.uptime || '--:--:--';
+                document.getElementById('active-trades').textContent = data.active_trades || 0;
+                document.getElementById('tracked-assets').textContent = data.tracked_assets || 0;
+                document.getElementById('positions-count').textContent = data.positions_count || 0;
+
+                const badge = document.getElementById('status-badge');
+                const text = document.getElementById('status-text');
+                const dot = badge.querySelector('.status-dot');
+
+                if (data.running) {
+                    badge.className = 'status-badge running';
+                    dot.className = 'status-dot running';
+                    text.textContent = 'Running';
+                } else {
+                    badge.className = 'status-badge stopped';
+                    dot.className = 'status-dot stopped';
+                    text.textContent = 'Stopped';
+                }
+            } catch (e) {
+                console.error('Failed to fetch status:', e);
+            }
+        }
+
+        // Fetch active trades
+        async function fetchTrades() {
+            try {
+                const res = await fetch('/api/trades');
+                const data = await res.json();
+                const tbody = document.getElementById('trades-body');
+
+                if (data.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No active trades</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = data.map(t => `
+                    <tr>
+                        <td>${t.asset}</td>
+                        <td>$${t.entry_price.toFixed(4)}</td>
+                        <td>$${t.current_price.toFixed(4)}</td>
+                        <td class="${t.pnl >= 0 ? 'positive' : 'negative'}">$${t.pnl.toFixed(2)} (${t.pnl_pct.toFixed(1)}%)</td>
+                        <td>${t.holding_time}s</td>
+                    </tr>
+                `).join('');
+            } catch (e) {
+                console.error('Failed to fetch trades:', e);
+            }
+        }
+
+        // Fetch positions
+        async function fetchPositions() {
+            try {
+                const res = await fetch('/api/positions');
+                const data = await res.json();
+                const tbody = document.getElementById('positions-body');
+
+                if (data.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No positions</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = data.map(p => `
+                    <tr>
+                        <td>${p.event}</td>
+                        <td>${p.outcome}</td>
+                        <td>${p.shares.toFixed(2)}</td>
+                        <td>$${p.current_price.toFixed(4)}</td>
+                        <td class="${p.pnl >= 0 ? 'positive' : 'negative'}">$${p.pnl.toFixed(2)} (${p.pnl_pct.toFixed(1)}%)</td>
+                    </tr>
+                `).join('');
+            } catch (e) {
+                console.error('Failed to fetch positions:', e);
+            }
+        }
+
+        // Fetch prices
+        async function fetchPrices() {
+            try {
+                const res = await fetch('/api/prices');
+                const data = await res.json();
+                const tbody = document.getElementById('prices-body');
+
+                if (data.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No price data</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = data.map(p => `
+                    <tr>
+                        <td>${p.event}</td>
+                        <td>${p.outcome}</td>
+                        <td>$${p.price.toFixed(4)}</td>
+                        <td class="${p.change >= 0 ? 'positive' : 'negative'}">${p.change >= 0 ? '+' : ''}${p.change.toFixed(2)}%</td>
+                    </tr>
+                `).join('');
+            } catch (e) {
+                console.error('Failed to fetch prices:', e);
+            }
+        }
+
+        // Fetch trade history
+        async function fetchHistory() {
+            try {
+                const res = await fetch('/api/history');
+                const data = await res.json();
+                const tbody = document.getElementById('history-body');
+
+                if (data.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No trade history</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = data.reverse().map(t => `
+                    <tr>
+                        <td>${t.timestamp}</td>
+                        <td><span class="badge badge-${t.type.toLowerCase()}">${t.type}</span></td>
+                        <td>${t.asset}</td>
+                        <td>$${t.price.toFixed(4)}</td>
+                        <td>${t.reason}</td>
+                    </tr>
+                `).join('');
+            } catch (e) {
+                console.error('Failed to fetch history:', e);
+            }
+        }
+
+        // Fetch logs on load
+        async function fetchLogs() {
+            try {
+                const res = await fetch('/api/logs');
+                const data = await res.json();
+                data.forEach(log => addLogEntry(log));
+            } catch (e) {
+                console.error('Failed to fetch logs:', e);
+            }
+        }
+
+        // Initial fetch
+        fetchStatus();
+        fetchTrades();
+        fetchPositions();
+        fetchPrices();
+        fetchHistory();
+        fetchLogs();
+
+        // Refresh data periodically
+        setInterval(fetchStatus, 2000);
+        setInterval(fetchTrades, 2000);
+        setInterval(fetchPositions, 5000);
+        setInterval(fetchPrices, 2000);
+    </script>
+</body>
+
+</html>

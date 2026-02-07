@@ -24,6 +24,9 @@ from enum import Enum
 import functools
 from queue import Queue
 
+# Dashboard imports
+from dashboard import start_dashboard, get_dashboard_logger, add_trade_to_history
+
 # Custom Exceptions
 class BotError(Exception):
     pass
@@ -72,7 +75,7 @@ BASE_DELAY = 1                  # Base delay for retries
 MAX_ERRORS = 5                  # Maximum number of errors before shutting down
 API_TIMEOUT = 10                # Timeout for API requests
 REFRESH_INTERVAL = 3600         # Refresh interval for API credentials
-COOLDOWN_PERIOD = 30            # Cooldown period for trades
+# COOLDOWN_PERIOD is now loaded from environment variables only (line 142)
 THREAD_POOL_SIZE = 3            # Number of threads in the thread pool 
 MAX_QUEUE_SIZE = 1000           # Maximum number of items in the queue
 THREAD_CHECK_INTERVAL = 5       # Interval for checking thread status
@@ -124,31 +127,58 @@ def validate_config() -> None:
             error_msg.append(f"Missing variables: {', '.join(missing)}")
         if invalid:
             error_msg.append(f"Invalid values for: {', '.join(invalid)}")
-        raise ValueError(" | ".join(error_msg))
+        return False, " | ".join(error_msg)
+    
+    return True, None
 
-# Global configuration
-validate_config()
+# Global configuration - check if valid, but don't crash
+CONFIG_VALID, CONFIG_ERROR = validate_config()
 
-TRADE_UNIT = float(os.getenv("trade_unit"))
-SLIPPAGE_TOLERANCE = float(os.getenv("slippage_tolerance"))
-PCT_PROFIT = float(os.getenv("pct_profit"))
-PCT_LOSS = float(os.getenv("pct_loss"))
-CASH_PROFIT = float(os.getenv("cash_profit"))
-CASH_LOSS = float(os.getenv("cash_loss"))
-SPIKE_THRESHOLD = float(os.getenv("spike_threshold"))
-SOLD_POSITION_TIME = float(os.getenv("sold_position_time"))
-HOLDING_TIME_LIMIT = float(os.getenv("holding_time_limit"))
-PRICE_HISTORY_SIZE = int(os.getenv("price_history_size"))
-COOLDOWN_PERIOD = int(os.getenv("cooldown_period"))
-KEEP_MIN_SHARES = int(os.getenv("keep_min_shares"))
-MAX_CONCURRENT_TRADES = int(os.getenv("max_concurrent_trades"))
-MIN_LIQUIDITY_REQUIREMENT = float(os.getenv("min_liquidity_requirement"))
+# Helper to get config with defaults
+def get_config(name: str, default, type_fn=float):
+    """Get config value with fallback to default"""
+    try:
+        value = os.getenv(name)
+        if value:
+            return type_fn(value)
+    except (ValueError, TypeError):
+        pass
+    return default
+
+# Trading parameters with defaults
+TRADE_UNIT = get_config("trade_unit", 3.0)
+SLIPPAGE_TOLERANCE = get_config("slippage_tolerance", 0.06)
+PCT_PROFIT = get_config("pct_profit", 0.03)
+PCT_LOSS = get_config("pct_loss", -0.025)
+CASH_PROFIT = get_config("cash_profit", 3.0)
+CASH_LOSS = get_config("cash_loss", -3.0)
+SPIKE_THRESHOLD = get_config("spike_threshold", 0.01)
+SOLD_POSITION_TIME = get_config("sold_position_time", 1800.0)
+HOLDING_TIME_LIMIT = get_config("holding_time_limit", 60.0)
+PRICE_HISTORY_SIZE = get_config("price_history_size", 120, int)
+COOLDOWN_PERIOD = get_config("cooldown_period", 120, int)
+KEEP_MIN_SHARES = get_config("keep_min_shares", 1, int)
+MAX_CONCURRENT_TRADES = get_config("max_concurrent_trades", 3, int)
+MIN_LIQUIDITY_REQUIREMENT = get_config("min_liquidity_requirement", 10.0)
+
 # Web3 and API setup
 WEB3_PROVIDER = "https://polygon-rpc.com"
-YOUR_PROXY_WALLET = Web3.to_checksum_address(os.getenv("YOUR_PROXY_WALLET"))
-BOT_TRADER_ADDRESS = Web3.to_checksum_address(os.getenv("BOT_TRADER_ADDRESS"))
-USDC_CONTRACT_ADDRESS = os.getenv("USDC_CONTRACT_ADDRESS")
-POLYMARKET_SETTLEMENT_CONTRACT = os.getenv("POLYMARKET_SETTLEMENT_CONTRACT")
+
+# Safe wallet address loading
+def get_checksum_address(env_var: str):
+    """Safely get checksum address, return None if not set"""
+    try:
+        value = os.getenv(env_var)
+        if value:
+            return Web3.to_checksum_address(value)
+    except Exception:
+        pass
+    return None
+
+YOUR_PROXY_WALLET = get_checksum_address("YOUR_PROXY_WALLET")
+BOT_TRADER_ADDRESS = get_checksum_address("BOT_TRADER_ADDRESS")
+USDC_CONTRACT_ADDRESS = os.getenv("USDC_CONTRACT_ADDRESS", "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
+POLYMARKET_SETTLEMENT_CONTRACT = os.getenv("POLYMARKET_SETTLEMENT_CONTRACT", "0x56C79347e95530c01A2FC76E732f9566dA16E113")
 PRIVATE_KEY = os.getenv("PK")
 
 web3 = Web3(Web3.HTTPProvider(WEB3_PROVIDER))
@@ -201,6 +231,13 @@ def setup_logging() -> logging.Logger:
     # Add handlers to logger
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
+    
+    # Add dashboard handler for streaming logs to web UI
+    try:
+        dashboard_handler = get_dashboard_logger()
+        logger.addHandler(dashboard_handler)
+    except Exception:
+        pass  # Dashboard not available yet
     
     return logger
 
@@ -464,26 +501,37 @@ class ThreadSafeState:
 
 # Initialize ClobClient with retry mechanism
 def initialize_clob_client(max_retries: int = 3) -> ClobClient:
+    global PRIVATE_KEY, YOUR_PROXY_WALLET
+    
+    # Ensure we have the latest keys
+    if not PRIVATE_KEY or not YOUR_PROXY_WALLET:
+        PRIVATE_KEY = os.getenv("PK")
+        val = os.getenv("YOUR_PROXY_WALLET")
+        if val:
+            YOUR_PROXY_WALLET = Web3.to_checksum_address(val)
+
     for attempt in range(max_retries):
         try:
-            client = ClobClient(
+            logger.info(f"🔑 Initializing CLOB client with proxy: {YOUR_PROXY_WALLET}")
+            c = ClobClient(
                 host="https://clob.polymarket.com",
                 key=PRIVATE_KEY,
                 chain_id=137,
                 signature_type=2,
                 funder=YOUR_PROXY_WALLET
             )
-            api_creds = client.create_or_derive_api_creds()
-            client.set_api_creds(api_creds)
-            return client
+            api_creds = c.create_or_derive_api_creds()
+            c.set_api_creds(api_creds)
+            return c
         except Exception as e:
             if attempt == max_retries - 1:
+                logger.error(f"❌ Failed to initialize CLOB client: {e}")
                 raise
             logger.warning(f"Failed to initialize ClobClient (attempt {attempt + 1}/{max_retries}): {e}")
             time.sleep(2 ** attempt)
     raise RuntimeError("Failed to initialize ClobClient after maximum retries")
 
-client = initialize_clob_client()
+client = None
 
 # API functions with retry mechanism
 def fetch_positions_with_retry(max_retries: int = MAX_RETRIES) -> Dict[str, List[PositionInfo]]:
@@ -735,8 +783,10 @@ def place_buy_order(state: ThreadSafeState, asset: str, reason: str) -> bool:
                     logger.warning(f"🔒 Insufficient liquidity for {asset}. Required: ${MIN_LIQUIDITY_REQUIREMENT}, Available: ${min_ask_size * min_ask_price:.2f}")
                     return False
 
-                if min_ask_price - current_price > SLIPPAGE_TOLERANCE:
-                    logger.warning(f"🔐 Slippage tolerance exceeded for {asset}. Skipping order.")
+                # Calculate slippage as percentage
+                slippage_pct = (min_ask_price - current_price) / current_price if current_price > 0 else 0
+                if slippage_pct > SLIPPAGE_TOLERANCE:
+                    logger.warning(f"🔐 Slippage tolerance exceeded for {asset}. Slippage: {slippage_pct:.2%}, Tolerance: {SLIPPAGE_TOLERANCE:.2%}")
                     return False
 
                 # Calculate position size based on account balance
@@ -769,6 +819,9 @@ def place_buy_order(state: ThreadSafeState, asset: str, reason: str) -> bool:
                     state.update_recent_trade(asset, TradeType.BUY)
                     state.add_active_trade(asset, trade_info)
                     state.set_last_trade_time(time.time())
+                    
+                    # Track trade for dashboard
+                    add_trade_to_history("BUY", asset, min_ask_price, amount_in_dollars, reason)
                     return True
                 else:
                     error_msg = response.get("error", "Unknown error")
@@ -816,6 +869,12 @@ def place_sell_order(state: ThreadSafeState, asset: str, reason: str) -> bool:
                 max_bid_price = float(max_bid_data["max_bid_price"])
                 max_bid_size = float(max_bid_data["max_bid_size"])
 
+                # Initialize variables with defaults to avoid undefined variable errors
+                balance = 0
+                avg_price = 0
+                sell_amount_in_shares = 0
+                position_found = False
+                
                 positions = state.get_positions()
                 for event_id, item in positions.items():
                     for position in item:
@@ -823,18 +882,27 @@ def place_sell_order(state: ThreadSafeState, asset: str, reason: str) -> bool:
                             balance = position.shares
                             avg_price = position.avg_price
                             sell_amount_in_shares = balance - KEEP_MIN_SHARES
+                            position_found = True
+                            break
+                    if position_found:
+                        break
+
+                if not position_found:
+                    logger.warning(f"🙄 No position found for {asset}, Skipping...")
+                    return False
 
                 if sell_amount_in_shares < 1:
-                    logger.warning(f"🙄 No shares to sell for {asset}, Skipping...")
-                    continue
+                    logger.warning(f"🙄 No shares to sell for {asset} (balance: {balance}, min keep: {KEEP_MIN_SHARES}), Skipping...")
+                    return False
 
                 slippage = current_price - max_bid_price
+                # Fixed: avg_price > max_bid_price means we're selling below entry = LOSS
                 if avg_price > max_bid_price:
-                    profit_amount = sell_amount_in_shares * (avg_price - max_bid_price)
-                    logger.info(f"balance: {balance}, slippage: {slippage}----You will earn ${profit_amount}")
+                    loss_amount = sell_amount_in_shares * (avg_price - max_bid_price)
+                    logger.info(f"balance: {balance}, slippage: {slippage}----You will LOSE ${loss_amount:.2f}")
                 else:
-                    loss_amount = sell_amount_in_shares * (max_bid_price - avg_price)
-                    logger.info(f"balance: {balance}, slippage: {slippage}----You will lose ${loss_amount}")
+                    profit_amount = sell_amount_in_shares * (max_bid_price - avg_price)
+                    logger.info(f"balance: {balance}, slippage: {slippage}----You will EARN ${profit_amount:.2f}")
 
                 order_args = MarketOrderArgs(
                     token_id=str(asset),
@@ -849,6 +917,9 @@ def place_sell_order(state: ThreadSafeState, asset: str, reason: str) -> bool:
                     state.update_recent_trade(asset, TradeType.SELL)
                     state.remove_active_trade(asset)
                     state.set_last_trade_time(time.time())
+                    
+                    # Track trade for dashboard
+                    add_trade_to_history("SELL", asset, max_bid_price, sell_amount_in_shares, reason)
                     return True
                 else:
                     error_msg = response.get("error", "Unknown error")
@@ -1047,10 +1118,14 @@ def detect_and_trade(state: ThreadSafeState) -> None:
                 for asset_id in list(state._price_history.keys()):
                     try:
                         history = state.get_price_history(asset_id)
-                        if len(history) < 2:
+                        # Need at least 5 price points for spike detection
+                        if len(history) < 5:
                             continue
 
-                        old_price = history[0][1]
+                        # Use recent prices for spike detection (last 5-10 seconds)
+                        # Compare current price to price from ~5 updates ago (5 seconds)
+                        recent_lookback = min(5, len(history) - 1)
+                        old_price = history[-recent_lookback - 1][1]
                         new_price = history[-1][1]
                         
                         # Skip if either price is zero to prevent division by zero
@@ -1061,24 +1136,36 @@ def detect_and_trade(state: ThreadSafeState) -> None:
                         delta = (new_price - old_price) / old_price
 
                         if abs(delta) > SPIKE_THRESHOLD:
+                            # Skip prices outside tradeable range
                             if new_price < 0.20 or new_price > 0.80:
+                                logger.debug(f"⚠️ Skipping {asset_id} - price ${new_price:.4f} outside range [0.20, 0.80]")
                                 continue
 
-                            
                             opposite = state.get_asset_pair(asset_id)
                             if not opposite:
+                                logger.debug(f"⚠️ No opposite pair found for {asset_id}")
                                 continue
 
                             if delta > 0 and not is_recently_bought(state, asset_id):
                                 logger.info(f"🟨 Spike Detected | Asset: {asset_id} | Delta: {delta:.2%} | Price: ${new_price:.4f}")
                                 logger.info(f"🟢 Buy Signal | Asset: {asset_id} | Price: ${new_price:.4f}")
                                 if place_buy_order(state, asset_id, "Spike detected"):
-                                    place_sell_order(state, opposite, "Opposite trade")
+                                    # Only try opposite sell if we have shares to sell
+                                    opposite_position = find_position_by_asset(positions_copy, opposite)
+                                    if opposite_position and opposite_position.shares > KEEP_MIN_SHARES:
+                                        place_sell_order(state, opposite, "Opposite trade")
+                                    else:
+                                        logger.info(f"🟡 Skipping opposite sell - no shares for {opposite}")
                             elif delta < 0 and not is_recently_sold(state, asset_id):
                                 logger.info(f"🟨 Spike Detected | Asset: {asset_id} | Delta: {delta:.2%} | Price: ${new_price:.4f}")
                                 logger.info(f"🔴 Sell Signal | Asset: {asset_id} | Price: ${new_price:.4f}")
-                                if place_sell_order(state, asset_id, "Spike detected"):
-                                    place_buy_order(state, opposite, "Opposite trade")
+                                # Only try to sell if we have shares
+                                current_position = find_position_by_asset(positions_copy, asset_id)
+                                if current_position and current_position.shares > KEEP_MIN_SHARES:
+                                    if place_sell_order(state, asset_id, "Spike detected"):
+                                        place_buy_order(state, opposite, "Opposite trade")
+                                else:
+                                    logger.info(f"🟡 Skipping sell - no shares for {asset_id}")
 
                     except IndexError:
                         logger.debug(f"⏳ Building price history for {asset_id}")
@@ -1109,10 +1196,18 @@ def check_trade_exits(state: ThreadSafeState) -> None:
                     positions_copy = state.get_positions()
                     position = find_position_by_asset(positions_copy, asset_id)
                     if not position:
+                        # Position no longer exists, remove from active trades
+                        logger.warning(f"⚠️ Position not found for active trade {asset_id}, removing from tracking")
+                        state.remove_active_trade(asset_id)
                         continue
                         
                     current_price = get_current_price(state, asset_id)
                     if current_price is None:
+                        continue
+                    
+                    # Avoid division by zero
+                    if position.avg_price == 0:
+                        logger.warning(f"⚠️ Zero avg_price for {asset_id}, skipping exit check")
                         continue
                         
                     current_time = time.time()
@@ -1121,24 +1216,33 @@ def check_trade_exits(state: ThreadSafeState) -> None:
                     remaining_shares = position.shares
                     cash_profit = (current_price - avg_price) * remaining_shares
                     pct_profit = (current_price - avg_price) / avg_price
+                    
+                    # Track if we sold so we don't check multiple conditions
+                    trade_exited = False
 
+                    # Check holding time limit FIRST
                     if current_time - last_traded > HOLDING_TIME_LIMIT:
                         logger.info(f"⏰ Holding Time Limit Hit | Asset: {asset_id} | Holding Time: {current_time - last_traded:.2f} seconds | Time: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-                        place_sell_order(state, asset_id, "Holding time limit")
-                        state.remove_active_trade(asset_id)
-                        state.set_last_trade_time(time.time())
+                        if place_sell_order(state, asset_id, "Holding time limit"):
+                            state.remove_active_trade(asset_id)
+                            state.set_last_trade_time(time.time())
+                        trade_exited = True
                     
-                    if cash_profit >= CASH_PROFIT or pct_profit > PCT_PROFIT:
+                    # Check take profit (use elif to avoid double-sell)
+                    elif cash_profit >= CASH_PROFIT or pct_profit > PCT_PROFIT:
                         logger.info(f"🎯 Take Profit Hit | Asset: {asset_id} | Profit: ${cash_profit:.2f} ({pct_profit:.2%}) | Time: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-                        place_sell_order(state, asset_id, "Take profit")
-                        state.remove_active_trade(asset_id)
-                        state.set_last_trade_time(time.time())
+                        if place_sell_order(state, asset_id, "Take profit"):
+                            state.remove_active_trade(asset_id)
+                            state.set_last_trade_time(time.time())
+                        trade_exited = True
 
-                    if cash_profit <= CASH_LOSS or pct_profit < PCT_LOSS:
+                    # Check stop loss (use elif to avoid double-sell)
+                    elif cash_profit <= CASH_LOSS or pct_profit < PCT_LOSS:
                         logger.info(f"🔴 Stop Loss Hit | Asset: {asset_id} | Loss: ${cash_profit:.2f} ({pct_profit:.2%}) | Time: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-                        place_sell_order(state, asset_id, "Stop loss")
-                        state.remove_active_trade(asset_id)
-                        state.set_last_trade_time(time.time())
+                        if place_sell_order(state, asset_id, "Stop loss"):
+                            state.remove_active_trade(asset_id)
+                            state.set_last_trade_time(time.time())
+                        trade_exited = True
 
 
                 except Exception as e:
@@ -1172,11 +1276,16 @@ def wait_for_initialization(state: ThreadSafeState) -> bool:
         try:
             positions = fetch_positions_with_retry()
             for event_id, sides in positions.items():
-                logger.info(f"🔎 Event ID {event_id}: {len(sides)}")
-                if len(sides) % 2 == 0 and len(sides) > 1:
+                logger.info(f"🔎 Event ID {event_id}: {len(sides)} outcomes")
+                # Handle markets with 2+ outcomes
+                if len(sides) >= 2:
                     ids = [s.asset for s in sides]
-                    state.add_asset_pair(ids[0], ids[1])
-                    logger.info(f"✅ Initialized asset pair: {ids[0]} ↔ {ids[1]}")
+                    # Pair all combinations - for binary markets this pairs 0<->1
+                    # For multi-outcome markets, pair each with the next
+                    for i in range(len(ids)):
+                        for j in range(i + 1, len(ids)):
+                            state.add_asset_pair(ids[i], ids[j])
+                            logger.info(f"✅ Initialized asset pair: {ids[i][:16]}... ↔ {ids[j][:16]}...")
             
             if state.is_initialized():
                 logger.info(f"✅ Initialization complete with {len(state._initialized_assets)} assets.")
@@ -1250,28 +1359,75 @@ def signal_handler(signum: int, frame: Any, state: ThreadSafeState) -> None:
     sys.exit(0)
 
 def main() -> None:
+    # Declare globals we might need to update
+    global CONFIG_VALID, YOUR_PROXY_WALLET, BOT_TRADER_ADDRESS, PRIVATE_KEY
+    
     state = None
     thread_manager = None
     try:
-        state = ThreadSafeState()
-        thread_manager = ThreadManager(state)
         print_spikebot_banner()
+        
+        # Initialize state for dashboard
+        state = ThreadSafeState()
+        
+        # Start dashboard first so user can configure
+        logger.info("📊 Starting dashboard server on http://localhost:5000")
+        start_time = time.time()
+        dashboard_thread = start_dashboard(state, start_time)
+        logger.info("✅ Dashboard started successfully")
+        
+        # Check configuration
+        if not CONFIG_VALID:
+            logger.warning("⚠️ Configuration incomplete. Please configure via dashboard at http://localhost:5000/settings")
+            logger.warning(f"Missing/Invalid: {CONFIG_ERROR}")
+            
+            # Wait for configuration to be valid
+            while not CONFIG_VALID:
+                time.sleep(2)
+                # Reload env to check if user saved settings
+                from dotenv import load_dotenv
+                load_dotenv(override=True)
+                
+                # Re-validate
+                valid, error = validate_config()
+                if valid:
+                    logger.info("✅ Configuration updated and valid! Starting bot...")
+                    # Update global variables
+                    CONFIG_VALID = True
+                    YOUR_PROXY_WALLET = get_checksum_address("YOUR_PROXY_WALLET")
+                    BOT_TRADER_ADDRESS = get_checksum_address("BOT_TRADER_ADDRESS")
+                    PRIVATE_KEY = os.getenv("PK")
+                    break
+        
+        # Initialize CLOB client
+        global client
+        try:
+            client = initialize_clob_client()
+            logger.info("✅ CLOB Client initialized successfully")
+        except Exception as e:
+            logger.error(f"❌ Critical error initializing CLOB client: {e}")
+            return
+
+        thread_manager = ThreadManager(state)
         
         # Set up signal handlers
         signal.signal(signal.SIGINT, lambda s, f: signal_handler(s, f, state))
         signal.signal(signal.SIGTERM, lambda s, f: signal_handler(s, f, state))
         
         # Initialize
-        spinner = Halo(text="Waiting for manual $1 entries on both sides of a market...", spinner="dots")
+        spinner = Halo(text="Initializing bot components...", spinner="dots")
         spinner.start()
-        time.sleep(5)
-        logger.info(f"🚀 Spike-detection bot started at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        time.sleep(2)
         
         if not wait_for_initialization(state):
-            spinner.fail("❌ Failed to initialize. Exiting.")
-            raise ConfigurationError("Failed to initialize bot")
+            spinner.fail("❌ Failed to initialize. Check your network or wallet settings.")
+            # Don't crash, just wait for user to fix settings
+            while not state.is_shutdown():
+                time.sleep(1)
+            return
         
         spinner.succeed("Initialized successfully")
+        logger.info(f"🚀 Spike-detection bot started at {time.strftime('%Y-%m-%d %H:%M:%S')}")
         
         # Start price update thread first and wait for initial data
         logger.info("🔄 Starting price update thread...")
@@ -1300,7 +1456,6 @@ def main() -> None:
         last_refresh_time = time.time()
         refresh_interval = REFRESH_INTERVAL
         last_status_time = time.time()
-        last_daily_reset = time.time()
         
         # Main loop
         while not state.is_shutdown():
@@ -1328,11 +1483,19 @@ def main() -> None:
                         time.sleep(300)
                         continue
                 
-                # Check if any threads have died
+                # Check if any threads have died - use proper name-to-function mapping
+                thread_function_map = {
+                    "price_update": update_price_history,
+                    "detect_trade": detect_and_trade,
+                    "check_exits": check_trade_exits
+                }
                 for name, thread in thread_manager.threads.items():
                     if not thread.is_alive():
                         logger.warning(f"⚠️ Thread {name} has died. Restarting...")
-                        thread_manager.start_thread(name, globals()[name.replace(" ", "_")])
+                        if name in thread_function_map:
+                            thread_manager.start_thread(name, thread_function_map[name])
+                        else:
+                            logger.error(f"❌ Unknown thread name: {name}, cannot restart")
                 
                 time.sleep(1)
                 
