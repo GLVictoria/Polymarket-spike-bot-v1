@@ -7,7 +7,7 @@ services:
       - "5000:5000"
     volumes:
       # Mount .env file (keep secrets out of image)
-      - ./.env:/app/.env:ro
+      - ./.env:/app/.env
       # Persist logs
       - ./logs:/app/logs
     environment:

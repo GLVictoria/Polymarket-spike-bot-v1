@@ -360,6 +360,10 @@
                 <h1>PolySpike Dashboard</h1>
             </div>
             <div style="display: flex; align-items: center; gap: 16px;">
+                <button onclick="restartBot()"
+                    style="color: var(--text-secondary); background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; font-size: 0.875rem; padding: 8px 16px; cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                    🔄 Restart
+                </button>
                 <a href="/settings"
                     style="color: var(--text-secondary); text-decoration: none; padding: 8px 16px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; font-size: 0.875rem;">⚙️
                     Settings</a>
@@ -736,6 +740,26 @@
         setInterval(fetchTrades, 2000);
         setInterval(fetchPositions, 5000);
         setInterval(fetchPrices, 2000);
+
+        async function restartBot() {
+            if (!confirm('Are you sure you want to restart the bot? Trading will be interrupted briefly.')) return;
+            const btn = event.target.closest('button');
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '🔄 Restarting...';
+            btn.disabled = true;
+
+            try {
+                await fetch('/api/restart', { method: 'POST' });
+                // Show notification and reload after delay
+                alert('Bot is restarting. Dashboard will reload in 10 seconds.');
+                setTimeout(() => location.reload(), 10000);
+            } catch (e) {
+                console.error('Restart failed:', e);
+                alert('Failed to request restart. Check logs.');
+                btn.innerHTML = originalText;
+                btn.disabled = false;
+            }
+        }
     </script>
 </body>
 

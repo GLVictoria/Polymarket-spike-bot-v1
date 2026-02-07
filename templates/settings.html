@@ -296,6 +296,33 @@
             </nav>
         </header>
 
+
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">👻 Phantom Access</span>
+            </div>
+            <div class="card-body">
+                <div class="warning-box" style="background: rgba(16, 185, 129, 0.1); border-color: var(--accent);">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        style="color: var(--accent);">
+                        <path d="M20 7h-9M14 17H5M14 17l-3-3M14 17l-3 3M20 7l-3-3M20 7l-3 3"></path>
+                    </svg>
+                    <p><strong>Tip:</strong> Connect Phantom to verify your wallet address. <br>
+                        <em>Note: You must still <strong>Export Private Key</strong> from Phantom (Settings &rarr;
+                            Export Private Key) and paste it below for the bot to trade autonomously.</em>
+                    </p>
+                </div>
+                <button class="btn btn-primary" onclick="connectPhantom()" id="phantomBtn">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                        <circle cx="12" cy="7" r="4"></circle>
+                    </svg>
+                    Connect Phantom Wallet
+                </button>
+                <p id="walletAddress" style="margin-top: 10px; font-family: monospace; color: var(--accent);"></p>
+            </div>
+        </div>
+
         <div id="content">
             <div class="loading">
                 <div class="spinner"></div>
@@ -307,6 +334,61 @@
 
     <script>
         let settingsData = {};
+
+        async function connectPhantom() {
+            const btn = document.getElementById('phantomBtn');
+            const addressDisplay = document.getElementById('walletAddress');
+
+            // Check for Phantom or general Ethereum provider
+            // Phantom exposes window.phantom.ethereum or just window.ethereum
+            let provider = window.phantom?.ethereum || window.ethereum;
+
+            if (!provider) {
+                showToast("Phantom Wallet (EVM) not detected! Please install.", "error");
+                window.open("https://phantom.app/", "_blank");
+                return;
+            }
+
+            try {
+                const originalText = btn.innerHTML;
+                btn.innerHTML = "Connecting...";
+                btn.disabled = true;
+
+                // Request accounts
+                const accounts = await provider.request({ method: 'eth_requestAccounts' });
+                const account = accounts[0];
+
+                // Update UI
+                addressDisplay.textContent = "Connected: " + account;
+                addressDisplay.style.color = "#10b981";
+                btn.innerHTML = "Connected ✓";
+                showToast("Wallet connected! Don't forget to export Private Key.", "success");
+
+                // Auto-fill address fields if they exist in the form
+                // Wait for form to render if not present?
+                // The form renders in loadSettings -> renderSettings
+                // So if user connects BEFORE settings load, we might miss the fields.
+                // But settings load fast.
+
+                setTimeout(() => {
+                    const traderInput = document.getElementById('BOT_TRADER_ADDRESS');
+                    const proxyInput = document.getElementById('YOUR_PROXY_WALLET');
+
+                    if (traderInput) {
+                        traderInput.value = account;
+                        // flash effect
+                        traderInput.style.borderColor = "#10b981";
+                        setTimeout(() => traderInput.style.borderColor = "", 1000);
+                    }
+                }, 500); // Small delay to ensure render
+
+            } catch (err) {
+                console.error(err);
+                showToast("Failed to connect: " + err.message, "error");
+                btn.innerHTML = "Retry Connection";
+                btn.disabled = false;
+            }
+        }
 
         async function loadSettings() {
             try {

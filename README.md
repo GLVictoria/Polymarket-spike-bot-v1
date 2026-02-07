@@ -4,9 +4,13 @@ A real-time trading bot for Polymarket that detects price spikes and executes tr
 
 ## Features
 
-- 📈 **Spike Detection** - Monitors price movements and detects rapid changes
-- ⚡ **Automatic Trading** - Places buy/sell orders based on spike direction
-- 🎯 **Take Profit / Stop Loss** - Configurable exit conditions
+- 📈 **Spike Detection** - Monitors price movements in highly active markets
+- 💾 **Persistence (V2)** - SQLite database stores active positions and history across restarts
+- 🛡️ **Risk Management (V2)** - Daily Circuit Breaker halts trading if losses exceed limits
+- 🧠 **Smart Checks (V2)** - Validates Spread and Liquidity before trading
+- 🔔 **Notifications (V2)** - Real-time alerts via Telegram and Discord
+- 🧹 **Orphan Manager (V2)** - Automatically adopts untracked wallet positions
+- ⚡ **Execution** - Uses `py-clob-client` for fast order placement
 - 📊 **Real-time Dashboard** - Monitor trades, positions, and logs via web UI
 - ⚙️ **Easy Configuration** - Configure wallet and settings directly in the dashboard
 - 🐳 **Docker Ready** - Simple one-command deployment

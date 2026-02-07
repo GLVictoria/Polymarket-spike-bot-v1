@@ -1,4 +1,5 @@
 import json
+import uuid
 import os
 import time
 import requests
@@ -26,6 +27,8 @@ from queue import Queue
 
 # Dashboard imports
 from dashboard import start_dashboard, get_dashboard_logger, add_trade_to_history
+from database import Database, TradeRecord
+from notifications import notification_manager
 
 # Custom Exceptions
 class BotError(Exception):
@@ -50,6 +53,7 @@ class TradeInfo:
     entry_time: float
     amount: float
     bot_triggered: bool
+    trade_id: Optional[str] = None
 
 @dataclass
 class PositionInfo:
@@ -80,6 +84,7 @@ THREAD_POOL_SIZE = 3            # Number of threads in the thread pool
 MAX_QUEUE_SIZE = 1000           # Maximum number of items in the queue
 THREAD_CHECK_INTERVAL = 5       # Interval for checking thread status
 THREAD_RESTART_DELAY = 2        # Delay before restarting a thread
+MAX_SPREAD = 0.10               # Maximum allowed spread (10%)
 
 # Load and validate environment variables
 load_dotenv(".env")
@@ -302,11 +307,9 @@ class ThreadSafeState:
         self._shutdown_event = Event()
         self._cleanup_complete = Event()
         self._circuit_breaker_lock = Lock()
-        # self._daily_pnl = 0.0
-        self._max_daily_loss = -100.0  # Maximum daily loss in USDC
-        self._max_drawdown = -200.0    # Maximum drawdown in USDC
-        # self._trading_enabled = True
+        
         self._max_price_history_size = max_price_history_size
+        self._keep_min_shares = keep_min_shares
         
         self._price_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=max_price_history_size))
         self._active_trades: Dict[str, TradeInfo] = {}
@@ -314,10 +317,66 @@ class ThreadSafeState:
         self._asset_pairs: Dict[str, str] = {}
         self._recent_trades: Dict[str, Dict[str, Optional[float]]] = {}
         self._last_trade_closed_at: float = 0
-        self._initialized_assets: set = set()
+        self._initialized_assets = set()
         self._last_spike_asset: Optional[str] = None
         self._last_spike_price: Optional[float] = None
-        self._counter: int = 0
+        
+        self._daily_pnl = 0.0
+        self._trading_enabled = True
+        self._max_daily_loss = CASH_LOSS * 3  # Example multiplier, configurable later
+        
+        self.db = Database()
+        self._load_active_trades_from_db()
+        self._load_daily_stats_from_db()
+        
+        self._counter = 0
+
+    def _load_daily_stats_from_db(self):
+        """Load daily stats for circuit breaker"""
+        try:
+            stats = self.db.get_daily_stats()
+            with self._circuit_breaker_lock:
+                self._daily_pnl = stats.get('realized_pnl', 0.0)
+                if self._daily_pnl <= self._max_daily_loss:
+                    self._trading_enabled = False
+                    logger.warning(f"🛑 Circuit Breaker Active on Startup! Daily PnL: ${self._daily_pnl:.2f}")
+            logger.info(f"💰 Daily PnL Loaded: ${self._daily_pnl:.2f}")
+        except Exception as e:
+            logger.error(f"❌ Failed to load daily stats: {e}")
+
+    def update_pnl(self, amount: float):
+        """Update daily PnL and check circuit breaker"""
+        with self._circuit_breaker_lock:
+            self._daily_pnl += amount
+            if self._daily_pnl <= self._max_daily_loss:
+                if self._trading_enabled:
+                    self._trading_enabled = False
+                    msg = f"🛑 Circuit Breaker Triggered!\nDaily PnL: ${self._daily_pnl:.2f}"
+                    logger.warning(msg)
+                    notification_manager.send_error(msg)
+    
+    def is_trading_enabled(self) -> bool:
+        with self._circuit_breaker_lock:
+            return self._trading_enabled
+
+    def _load_active_trades_from_db(self):
+        """Load active trades from database on startup"""
+        try:
+            active_trades = self.db.get_active_trades()
+            with self._active_trades_lock:
+                for trade in active_trades:
+                    # Convert TradeRecord to TradeInfo
+                    self._active_trades[trade.asset_id] = TradeInfo(
+                        entry_price=trade.entry_price,
+                        entry_time=trade.entry_time,
+                        amount=trade.shares,
+                        bot_triggered=True,  # Assume loaded trades are bot-triggered
+                        trade_id=trade.id
+                    )
+            if active_trades:
+                logger.info(f"🔄 Loaded {len(active_trades)} active trades from database")
+        except Exception as e:
+            logger.error(f"❌ Failed to load active trades from DB: {e}")
 
     def __enter__(self):
         return self
@@ -738,10 +797,10 @@ def check_usdc_balance(usdc_needed: float) -> bool:
 @log_function_call(logger)
 def place_buy_order(state: ThreadSafeState, asset: str, reason: str) -> bool:
     try:
-        # # Check circuit breaker
-        # if not state.is_trading_enabled():
-        #     logger.warning("🔒 Trading disabled due to circuit breaker")
-        #     return False
+        # Check circuit breaker
+        if not state.is_trading_enabled():
+            logger.warning("🔒 Trading disabled due to circuit breaker")
+            return False
 
         # Check maximum concurrent trades
         active_trades = state.get_active_trades()
@@ -789,6 +848,21 @@ def place_buy_order(state: ThreadSafeState, asset: str, reason: str) -> bool:
                     logger.warning(f"🔐 Slippage tolerance exceeded for {asset}. Slippage: {slippage_pct:.2%}, Tolerance: {SLIPPAGE_TOLERANCE:.2%}")
                     return False
 
+                # Check Spread
+                try:
+                    max_bid_data = get_max_bid_data(asset)
+                    if max_bid_data:
+                        bid_price = float(max_bid_data["max_bid_price"])
+                        if bid_price > 0:
+                            spread = (min_ask_price - bid_price) / bid_price
+                            if spread > MAX_SPREAD:
+                                logger.warning(f"📉 Spread too high for {asset}: {spread:.2%}. Limit: {MAX_SPREAD:.2%}")
+                                return False
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to check spread for {asset}: {e}")
+
+
+
                 # Calculate position size based on account balance
                 amount_in_dollars = min(TRADE_UNIT, min_ask_size * min_ask_price)
                 
@@ -809,19 +883,40 @@ def place_buy_order(state: ThreadSafeState, asset: str, reason: str) -> bool:
                     filled = response.get("data", {}).get("filledAmount", amount_in_dollars)
                     logger.info(f"🛒 [{reason}] Order placed: BUY {filled:.4f} shares of {asset} at ${min_ask_price:.4f}")
                     
+                    # Generate trade ID
+                    trade_id = str(uuid.uuid4())
+                    
                     trade_info = TradeInfo(
                         entry_price=min_ask_price,
                         entry_time=time.time(),
                         amount=amount_in_dollars,
-                        bot_triggered=True
+                        bot_triggered=True,
+                        trade_id=trade_id
                     )
                     
                     state.update_recent_trade(asset, TradeType.BUY)
                     state.add_active_trade(asset, trade_info)
                     state.set_last_trade_time(time.time())
                     
+                    # Save to DB
+                    if hasattr(state, 'db'):
+                        est_shares = amount_in_dollars / min_ask_price if min_ask_price > 0 else 0
+                        record = TradeRecord(
+                            id=trade_id,
+                            asset_id=asset,
+                            entry_price=min_ask_price,
+                            entry_time=time.time(),
+                            shares=est_shares,
+                            side='BUY',
+                            status='OPEN',
+                            reason=reason,
+                            meta={'amount_usdc': amount_in_dollars}
+                        )
+                        state.db.add_trade(record)
+                    
                     # Track trade for dashboard
                     add_trade_to_history("BUY", asset, min_ask_price, amount_in_dollars, reason)
+                    notification_manager.send_trade_alert("BUY", asset, min_ask_price, amount_in_dollars, reason)
                     return True
                 else:
                     error_msg = response.get("error", "Unknown error")
@@ -914,12 +1009,37 @@ def place_sell_order(state: ThreadSafeState, asset: str, reason: str) -> bool:
                 if response.get("success"):
                     filled = response.get("data", {}).get("filledAmount", sell_amount_in_shares)
                     logger.info(f"🛒 [{reason}] Order placed: SELL {filled:.4f} shares of {asset}")
+                    
+                    # Close trade in DB
+                    if hasattr(state, 'db'):
+                        try:
+                            # Use active_trades lock via getter/setter? Or just accept slight race condition
+                            # Better: get trade info before removing
+                            active_trades_snapshot = state.get_active_trades()
+                            if asset in active_trades_snapshot:
+                                trade_info = active_trades_snapshot[asset]
+                                if trade_info.trade_id:
+                                    pnl = (max_bid_price - avg_price) * sell_amount_in_shares
+                                    state.db.update_trade_exit(
+                                        trade_id=trade_info.trade_id,
+                                        exit_price=max_bid_price,
+                                        exit_time=time.time(),
+                                        pnl=pnl,
+                                        reason=reason
+                                    )
+                                    # Update in-memory PnL and check circuit breaker
+                                    state.update_pnl(pnl)
+                        except Exception as e:
+                            logger.error(f"Failed to update DB for SELL: {e}")
+
                     state.update_recent_trade(asset, TradeType.SELL)
                     state.remove_active_trade(asset)
                     state.set_last_trade_time(time.time())
                     
                     # Track trade for dashboard
                     add_trade_to_history("SELL", asset, max_bid_price, sell_amount_in_shares, reason)
+                    value = max_bid_price * sell_amount_in_shares
+                    notification_manager.send_trade_alert("SELL", asset, max_bid_price, value, reason)
                     return True
                 else:
                     error_msg = response.get("error", "Unknown error")
@@ -1287,9 +1407,11 @@ def wait_for_initialization(state: ThreadSafeState) -> bool:
                             state.add_asset_pair(ids[i], ids[j])
                             logger.info(f"✅ Initialized asset pair: {ids[i][:16]}... ↔ {ids[j][:16]}...")
             
-            if state.is_initialized():
-                logger.info(f"✅ Initialization complete with {len(state._initialized_assets)} assets.")
-                return True
+            # Always return True if we successfully fetched positions (even if empty)
+            logger.info(f"✅ Initialization complete. Found {len(state._initialized_assets)} tracking assets.")
+            if len(state._initialized_assets) == 0:
+                logger.warning("⚠️ No positions found. Bot will be idle until you open positions on Polymarket.")
+            return True
                 
             retry_count += 1
             time.sleep(2)
@@ -1301,6 +1423,59 @@ def wait_for_initialization(state: ThreadSafeState) -> bool:
     
     logger.warning("❌ Initialization timed out after 2 minutes.")
     return False
+
+def sync_orphan_positions(state: ThreadSafeState) -> None:
+    """Check for positions in wallet that are not tracked by bot"""
+    try:
+        positions_map = state.get_positions()
+        active_trades = state.get_active_trades()
+        
+        count = 0
+        for event_id, positions in positions_map.items():
+            for pos in positions:
+                # If position exists (> min shares) and not in active trades
+                if pos.shares > KEEP_MIN_SHARES and pos.asset not in active_trades:
+                    logger.info(f"🧹 Found orphan position: {pos.eventslug} ({pos.outcome}) | {pos.shares:.2f} shares")
+                    
+                    # Adopt it!
+                    trade_id = str(uuid.uuid4())
+                    
+                    # Create TradeInfo
+                    trade_info = TradeInfo(
+                        entry_price=pos.avg_price,
+                        entry_time=time.time(), # We don't know original time, assume now for holding limit
+                        amount=pos.shares * pos.avg_price, # Estimate cost
+                        bot_triggered=False,
+                        trade_id=trade_id
+                    )
+                    
+                    state.add_active_trade(pos.asset, trade_info)
+                    
+                    # Save to DB
+                    if hasattr(state, 'db'):
+                        record = TradeRecord(
+                            id=trade_id,
+                            asset_id=pos.asset,
+                            entry_price=pos.avg_price,
+                            entry_time=time.time(),
+                            shares=pos.shares,
+                            side='BUY', # Assume long
+                            status='OPEN',
+                            reason='Orphan adoption',
+                            meta={'adopted': True}
+                        )
+                        state.db.add_trade(record)
+                    
+                    count += 1
+                    notification_manager.send_message(f"🧹 **Orphan Adopted**\nAsset: `{pos.eventslug}`\nShares: {pos.shares:.2f}")
+
+        if count > 0:
+            logger.info(f"✅ Adopted {count} orphan positions")
+        else:
+            logger.info("✨ No orphan positions found")
+            
+    except Exception as e:
+        logger.error(f"❌ Error syncing orphan positions: {e}")
 
 def print_spikebot_banner() -> None:
     banner = r"""
@@ -1397,6 +1572,7 @@ def main() -> None:
                     YOUR_PROXY_WALLET = get_checksum_address("YOUR_PROXY_WALLET")
                     BOT_TRADER_ADDRESS = get_checksum_address("BOT_TRADER_ADDRESS")
                     PRIVATE_KEY = os.getenv("PK")
+                    notification_manager.reload_config()
                     break
         
         # Initialize CLOB client
@@ -1428,6 +1604,10 @@ def main() -> None:
         
         spinner.succeed("Initialized successfully")
         logger.info(f"🚀 Spike-detection bot started at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        notification_manager.send_startup()
+        
+        # Check for orphans
+        sync_orphan_positions(state)
         
         # Start price update thread first and wait for initial data
         logger.info("🔄 Starting price update thread...")

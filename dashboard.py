@@ -4,6 +4,7 @@ Provides a web interface to monitor bot activities
 """
 
 import json
+import os
 import logging
 import threading
 import time
@@ -225,6 +226,10 @@ SETTINGS_SCHEMA = {
         'YOUR_PROXY_WALLET': {'label': 'Proxy Wallet', 'type': 'text', 'required': True},
         'BOT_TRADER_ADDRESS': {'label': 'Trader Address', 'type': 'text', 'required': True},
     },
+    'network': {
+        'USDC_CONTRACT_ADDRESS': {'label': 'USDC Contract (Polygon)', 'type': 'text', 'default': '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174', 'required': True},
+        'POLYMARKET_SETTLEMENT_CONTRACT': {'label': 'Settlement Contract', 'type': 'text', 'default': '0x56C79347e95530c01A2FC76E732f9566dA16E113', 'required': True},
+    },
     'trading': {
         'trade_unit': {'label': 'Trade Size (USDC)', 'type': 'number', 'default': '3'},
         'slippage_tolerance': {'label': 'Slippage Tolerance', 'type': 'number', 'default': '0.06'},
@@ -236,6 +241,12 @@ SETTINGS_SCHEMA = {
         'cash_profit': {'label': 'Take Profit ($)', 'type': 'number', 'default': '3'},
         'cash_loss': {'label': 'Stop Loss ($)', 'type': 'number', 'default': '-3'},
         'holding_time_limit': {'label': 'Max Hold Time (sec)', 'type': 'number', 'default': '60'},
+        'max_daily_loss': {'label': 'Max Daily Loss ($)', 'type': 'number', 'default': '-10'},
+    },
+    'notifications': {
+        'TELEGRAM_TOKEN': {'label': 'Telegram Bot Token', 'type': 'password', 'required': False},
+        'TELEGRAM_CHAT_ID': {'label': 'Telegram Chat ID', 'type': 'text', 'required': False},
+        'DISCORD_WEBHOOK_URL': {'label': 'Discord Webhook URL', 'type': 'password', 'required': False},
     },
     'advanced': {
         'cooldown_period': {'label': 'Cooldown (sec)', 'type': 'number', 'default': '120'},
@@ -301,14 +312,16 @@ def write_env_file(settings: Dict[str, str]) -> bool:
             env_path = path
             break
             
-    # If not found, create in current directory
+    # If not found, create in dashboard directory (safer than CWD)
     if not env_path:
-        env_path = os.path.abspath(ENV_FILE_PATH)
+        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ENV_FILE_PATH)
+    
+    print(f"Saving settings to: {env_path}")
     
     try:
         # Read existing file to preserve comments and order
         lines = []
-        existing_keys = set()
+        found_keys = set()
         
         if os.path.exists(env_path):
             with open(env_path, 'r') as f:
@@ -318,7 +331,7 @@ def write_env_file(settings: Dict[str, str]) -> bool:
                         key = stripped.split('=', 1)[0].strip()
                         if key in settings:
                             lines.append(f"{key}={settings[key]}\n")
-                            existing_keys.add(key)
+                            found_keys.add(key)
                         else:
                             lines.append(line)
                     else:
@@ -326,12 +339,13 @@ def write_env_file(settings: Dict[str, str]) -> bool:
         
         # Add any new keys that weren't in the original file
         for key, value in settings.items():
-            if key not in existing_keys:
+            if key not in found_keys:
                 lines.append(f"{key}={value}\n")
         
         with open(env_path, 'w') as f:
             f.writelines(lines)
-        
+            
+        print("Successfully wrote .env file")
         return True
     except Exception as e:
         print(f"Error writing .env file: {e}")
@@ -433,6 +447,19 @@ def start_dashboard(state, start_time=None):
     thread = threading.Thread(target=run_server, daemon=True, name="Dashboard")
     thread.start()
     return thread
+
+
+@app.route('/api/restart', methods=['POST'])
+def api_restart():
+    """Restart the bot"""
+    def restart_process():
+        # Give time for response to be sent
+        time.sleep(1)
+        # Force exit, Docker will restart it
+        os._exit(1)
+        
+    threading.Thread(target=restart_process).start()
+    return jsonify({'success': True, 'message': 'Bot restarting...'})
 
 
 # Price update emitter (call this from main bot)
