@@ -1614,6 +1614,41 @@ def print_spikebot_banner() -> None:
     """
     print(banner)
 
+def print_strategy_summary() -> None:
+    """Print a summary of bot strategy and settings for user understanding"""
+    summary = f"""
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         📊 BOT STRATEGY SUMMARY                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│  WHAT I DO:                                                              │
+│  • Monitor your Polymarket positions for sudden price movements          │
+│  • BUY when price spikes UP (momentum trading)                           │
+│  • SELL when price spikes DOWN or hits profit/loss targets               │
+│                                                                          │
+│  CURRENT SETTINGS:                                                       │
+│  • Spike Threshold: {SPIKE_THRESHOLD*100:.1f}% price change triggers trade              │
+│  • Trade Size: ${TRADE_UNIT:.2f} per trade                                        │
+│  • Take Profit: +${CASH_PROFIT:.2f} or +{PCT_PROFIT*100:.1f}%                                  │
+│  • Stop Loss: -${abs(CASH_LOSS):.2f} or {PCT_LOSS*100:.1f}%                                    │
+│  • Max Hold Time: {HOLDING_TIME_LIMIT:.0f} seconds                                      │
+│  • Cooldown: {COOLDOWN_PERIOD:.0f}s between trades on same market                  │
+│  • Price Range: Only trade when price is 20%-80% (avoid extremes)        │
+│                                                                          │
+│  LOG ICONS GUIDE:                                                        │
+│  📈 SPIKE UP    = Price rising fast, considering buy                     │
+│  📉 SPIKE DOWN  = Price falling fast, considering sell                   │
+│  🟢 BUY SIGNAL  = Placing buy order                                      │
+│  🔴 SELL SIGNAL = Placing sell order                                     │
+│  🎯 TAKE PROFIT = Sold for profit!                                       │
+│  🛑 STOP LOSS   = Sold to limit losses                                   │
+│  ⏰ TIME LIMIT  = Sold due to holding time limit                         │
+│  ⏭️ SKIP        = Trade skipped (reason shown)                           │
+│  💧 LOW LIQUID  = Not enough market depth                                │
+│  📊 SLIPPAGE    = Price would move too much on execution                 │
+└─────────────────────────────────────────────────────────────────────────┘
+"""
+    print(summary)
+
 def cleanup(state: ThreadSafeState) -> None:
     logger.info("🔄 Starting cleanup...")
     
@@ -1654,6 +1689,7 @@ def main() -> None:
     thread_manager = None
     try:
         print_spikebot_banner()
+        print_strategy_summary()
         
         # Initialize state for dashboard
         state = ThreadSafeState()
@@ -1774,7 +1810,30 @@ def main() -> None:
                 # Log status every 30 seconds
                 if current_time - last_status_time >= 30:
                     active_threads = sum(1 for t in thread_manager.threads.values() if t.is_alive())
-                    logger.info(f"📊 Bot Status | Active Threads: {active_threads}/3 | Price Updates: {len(state._price_history)}")
+                    active_trades = state.get_active_trades()
+                    tracked_markets = len(state.get_tracked_asset_ids())
+                    
+                    # Build a helpful status message
+                    status_parts = [
+                        f"🤖 BOT RUNNING",
+                        f"Threads: {active_threads}/3",
+                        f"Markets: {tracked_markets}",
+                        f"Open Trades: {len(active_trades)}"
+                    ]
+                    
+                    if active_trades:
+                        # Show brief summary of open positions
+                        for asset_id, trade in list(active_trades.items())[:3]:
+                            market_name = format_market_name(state, asset_id)
+                            hold_time = int(current_time - trade.entry_time)
+                            status_parts.append(f"  📍 {market_name} (held {hold_time}s)")
+                    else:
+                        status_parts.append("  👀 Watching for spikes...")
+                    
+                    logger.info(" | ".join(status_parts[:4]))
+                    for part in status_parts[4:]:
+                        logger.info(part)
+                    
                     last_status_time = current_time
                 
                 # Refresh API credentials
