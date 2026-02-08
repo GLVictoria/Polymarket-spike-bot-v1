@@ -1291,16 +1291,47 @@ def update_price_history(state: ThreadSafeState) -> None:
                         logger.error(f"❌ Error updating price for asset {asset_id}: {str(e)}")
                         continue
             
-            # Log price updates every 5 seconds
+            # Log price updates every 5 seconds - show what we're scanning
             if current_time - last_log_time >= 5:
-                logger.info("📊 Price Updates:\n" + "\n".join(price_updates))
+                if price_updates:
+                    # Group by event for cleaner display
+                    markets_summary = {}
+                    for event_id, assets in positions.items():
+                        for asset in assets:
+                            event_name = asset.eventslug.replace('-', ' ').title()
+                            if len(event_name) > 35:
+                                event_name = event_name[:32] + "..."
+                            if event_name not in markets_summary:
+                                markets_summary[event_name] = []
+                            markets_summary[event_name].append(f"{asset.outcome}: ${asset.current_price:.2f}")
+                    
+                    logger.info(f"👁️ SCANNING {len(markets_summary)} MARKETS:")
+                    for market, outcomes in list(markets_summary.items())[:10]:  # Show max 10
+                        outcomes_str = " | ".join(outcomes)
+                        logger.info(f"   📍 {market} → {outcomes_str}")
+                    if len(markets_summary) > 10:
+                        logger.info(f"   ... and {len(markets_summary) - 10} more markets")
+                        
                 last_log_time = current_time
                     
             if price_updated:
                 price_update_event.set()
                 if initial_update:
                     initial_update = False
-                    logger.info("✅ Initial price data population complete")
+                    # Show initial markets detected
+                    logger.info("✅ Initial price data loaded!")
+                    logger.info("=" * 60)
+                    logger.info("📋 MARKETS I'M WATCHING (your positions):")
+                    for event_id, assets in positions.items():
+                        if assets:
+                            event_name = assets[0].eventslug.replace('-', ' ').title()
+                            if len(event_name) > 40:
+                                event_name = event_name[:37] + "..."
+                            outcomes = [f"{a.outcome}=${a.current_price:.2f}" for a in assets]
+                            logger.info(f"   🎯 {event_name}")
+                            logger.info(f"      └─ {' | '.join(outcomes)}")
+                    logger.info("=" * 60)
+                    logger.info(f"💡 Watching for price spikes > {SPIKE_THRESHOLD*100:.1f}% on these markets...")
             
             # Log summary every 1 minute
             if update_count >= 60:
