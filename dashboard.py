@@ -10,9 +10,10 @@ import threading
 import time
 from datetime import datetime
 from collections import deque
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, request
 from flask_socketio import SocketIO, emit
 from typing import Optional, Dict, Any, List
+import requests
 
 # Dashboard configuration
 DASHBOARD_HOST = "0.0.0.0"
@@ -108,6 +109,7 @@ def api_status():
         'active_trades': len(active_trades),
         'tracked_assets': len(_bot_state._price_history),
         'positions_count': sum(len(p) for p in positions.values()),
+        'balance': _bot_state.get_balance(),
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     })
 
@@ -212,6 +214,80 @@ def api_history():
     """Get trade history"""
     return jsonify(list(_trade_history))
 
+
+
+@app.route('/api/portfolio-history')
+def api_portfolio_history():
+    """Get full portfolio history from Polymarket API"""
+    try:
+        # Get proxy wallet from settings
+        settings = read_env_file()
+        proxy_wallet = settings.get('YOUR_PROXY_WALLET')
+        
+        if not proxy_wallet:
+            return jsonify({'error': 'Proxy wallet not configured'}), 400
+            
+        # Fetch activity from Polymarket API
+        # We use the activity endpoint as it gives a good overview of actions
+        url = f"https://data-api.polymarket.com/activity?user={proxy_wallet}&limit=50"
+        
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            return jsonify(data)
+        else:
+            return jsonify({'error': f'API Error: {response.status_code}'}), 502
+            
+    except Exception as e:
+        print(f"Error fetching portfolio history: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+
+@app.route('/api/watched')
+def api_get_watched():
+    if _bot_state is None:
+        return jsonify({'error': 'Bot not initialized'}), 503
+    return jsonify(_bot_state.get_watched_markets())
+
+@app.route('/api/watch', methods=['POST'])
+def api_watch_market():
+    if _bot_state is None:
+        return jsonify({'error': 'Bot not initialized'}), 503
+        
+    data = request.get_json()
+    if not data or 'market_id' not in data:
+        return jsonify({'error': 'Missing market_id'}), 400
+        
+    market_id = data['market_id'].strip()
+    if not market_id or not market_id.startswith('0x'): # Basic validation
+         # Try to extract from URL if pasted
+        import re
+        match = re.search(r'0x[a-fA-F0-9]{40,}', market_id) # Token ID is usually long hex
+        if match:
+            market_id = match.group(0)
+        else:
+            # Maybe it's a condition ID, also hex
+            pass
+            
+    if _bot_state.add_watched_market(market_id):
+        return jsonify({'success': True, 'message': f'Now watching {market_id}'})
+    else:
+        return jsonify({'success': False, 'message': 'Already watching this market'})
+
+@app.route('/api/unwatch', methods=['POST'])
+def api_unwatch_market():
+    if _bot_state is None:
+        return jsonify({'error': 'Bot not initialized'}), 503
+        
+    data = request.get_json()
+    if not data or 'market_id' not in data:
+        return jsonify({'error': 'Missing market_id'}), 400
+        
+    if _bot_state.remove_watched_market(data['market_id']):
+        return jsonify({'success': True, 'message': 'Stopped watching market'})
+    else:
+        return jsonify({'success': False, 'message': 'Market was not being watched'})
 
 @app.route('/api/logs')
 def api_logs():

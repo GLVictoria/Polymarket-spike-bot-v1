@@ -191,6 +191,9 @@ COOLDOWN_PERIOD = get_config("cooldown_period", 120, int)
 KEEP_MIN_SHARES = get_config("keep_min_shares", 1, int)
 MAX_CONCURRENT_TRADES = get_config("max_concurrent_trades", 3, int)
 MIN_LIQUIDITY_REQUIREMENT = get_config("min_liquidity_requirement", 10.0)
+ENABLE_SMART_TRADING = get_config("enable_smart_trading", True, lambda x: str(x).lower() == 'true')
+RSI_PERIOD = get_config("rsi_period", 14, int)
+SMA_PERIOD = get_config("sma_period", 20, int)
 
 # Web3 and API setup
 WEB3_PROVIDER = "https://polygon-rpc.com"
@@ -336,6 +339,14 @@ class ThreadSafeState:
         self._paused_lock = Lock()
         self._paused = False
         
+        # New: Watched Markets
+        self._watched_markets: Set[str] = set()
+        self._watched_markets_lock = threading.Lock()
+        self._load_watched_markets()
+        
+        self._balance = 0.0
+        self._balance_lock = Lock()
+        
         self._max_price_history_size = max_price_history_size
         self._keep_min_shares = keep_min_shares
         
@@ -358,6 +369,53 @@ class ThreadSafeState:
         self._load_daily_stats_from_db()
         
         self._counter = 0
+
+    def _load_watched_markets(self):
+        try:
+            path = "watched_markets.json"
+            if os.path.exists(path):
+                with open(path, 'r') as f:
+                    self._watched_markets = set(json.load(f))
+                logger.info(f"Loaded {len(self._watched_markets)} watched markets")
+        except Exception as e:
+            logger.error(f"Failed to load watched markets: {e}")
+
+    def _save_watched_markets(self):
+        try:
+            with open("watched_markets.json", 'w') as f:
+                json.dump(list(self._watched_markets), f)
+        except Exception as e:
+            logger.error(f"Failed to save watched markets: {e}")
+
+    def add_watched_market(self, asset_id: str) -> bool:
+        with self._watched_markets_lock:
+            if asset_id not in self._watched_markets:
+                self._watched_markets.add(asset_id)
+                self._save_watched_markets()
+                logger.info(f"👀 Now watching market: {asset_id}")
+                return True
+        return False
+
+    def remove_watched_market(self, asset_id: str) -> bool:
+        with self._watched_markets_lock:
+            if asset_id in self._watched_markets:
+                self._watched_markets.remove(asset_id)
+                self._save_watched_markets()
+                logger.info(f"❌ Stopped watching market: {asset_id}")
+                return True
+        return False
+
+    def update_balance(self, amount: float):
+        with self._balance_lock:
+            self._balance = amount
+
+    def get_balance(self) -> float:
+        with self._balance_lock:
+            return self._balance
+
+    def get_watched_markets(self) -> List[str]:
+        with self._watched_markets_lock:
+            return list(self._watched_markets)
 
     def _load_daily_stats_from_db(self):
         """Load daily stats for circuit breaker"""
@@ -462,10 +520,13 @@ class ThreadSafeState:
                 self._price_history[asset_id] = deque(maxlen=self._max_price_history_size)
             self._price_history[asset_id].append((timestamp, price, eventslug, outcome))
 
-    def get_tracked_asset_ids(self) -> list:
-        """Get a copy of all tracked asset IDs for thread-safe iteration"""
+    def get_tracked_asset_ids(self) -> List[str]:
         with self._price_history_lock:
-            return list(self._price_history.keys())
+            keys = list(self._price_history.keys())
+        
+        # Ensure watched markets are included even if no history yet
+        watched = self.get_watched_markets()
+        return list(set(keys + watched))
 
     def get_asset_info(self, asset_id: str) -> tuple:
         """Get eventslug and outcome for an asset from price history"""
@@ -672,7 +733,7 @@ def fetch_positions_with_retry(max_retries: int = MAX_RETRIES) -> Dict[str, List
                 raise ValidationError(f"Invalid response format from API: {type(data)}")
             
             if not data:
-                logger.warning("⚠️ No positions found in API response. Waiting for positions...")
+                logger.info("✅ Connected to Polymarket. No open positions found (watching for new trades...)")
                 return {}
                 
             positions: Dict[str, List[PositionInfo]] = {}
@@ -1291,7 +1352,37 @@ def update_price_history(state: ThreadSafeState) -> None:
                         logger.error(f"❌ Error updating price for asset {asset_id}: {str(e)}")
                         continue
             
-            # Log price updates every 5 seconds - show what we're scanning
+            
+            # Fetch prices for Watched Markets
+            watched_markets = state.get_watched_markets()
+            if watched_markets:
+                logger.debug(f"👀 Checking {len(watched_markets)} watched markets...")
+                for asset_id in watched_markets:
+                    try:
+                        # Skip if we already got price via positions (ownership)
+                        if any(p.asset == asset_id for positions in positions.values() for p in positions):
+                            continue
+                            
+                        # Fetch individual market price
+                        # Using gamma-api for efficient single market lookup might be better, 
+                        # but clob_client.get_midpoint is direct.
+                        # For now, let's use the public ticker endpoint which is fast.
+                        
+                        price_url = f"https://clob.polymarket.com/midpoint?token_id={asset_id}"
+                        r = requests.get(price_url, timeout=5)
+                        if r.status_code == 200:
+                            data = r.json()
+                            if "mid" in data:
+                                price = float(data["mid"])
+                                state.add_price(asset_id, now, price, "Watched Market", "N/A")
+                                update_count += 1
+                                price_updated = True
+                                price_updates.append(f"👀 {asset_id[:8]}...: ${price:.4f}")
+                        
+                    except Exception as e:
+                        logger.error(f"Error updating watched market {asset_id}: {e}")
+
+            # Log price updates every 5 seconds
             if current_time - last_log_time >= 5:
                 if price_updates:
                     # Group by event for cleaner display
@@ -1305,6 +1396,17 @@ def update_price_history(state: ThreadSafeState) -> None:
                                 markets_summary[event_name] = []
                             markets_summary[event_name].append(f"{asset.outcome}: ${asset.current_price:.2f}")
                     
+                    # Also include watched markets in summary (just as raw list for now)
+                    if watched_markets:
+                        markets_summary["Watched Markets"] = []
+                        for asset_id in watched_markets:
+                            try:
+                                history = state.get_price_history(asset_id)
+                                if history:
+                                    price = history[-1][1]
+                                    markets_summary["Watched Markets"].append(f"{asset_id[:8]}...: ${price:.4f}")
+                            except: pass
+
                     logger.info(f"👁️ SCANNING {len(markets_summary)} MARKETS:")
                     for market, outcomes in list(markets_summary.items())[:10]:  # Show max 10
                         outcomes_str = " | ".join(outcomes)
@@ -1314,6 +1416,7 @@ def update_price_history(state: ThreadSafeState) -> None:
                         
                 last_log_time = current_time
                     
+
             if price_updated:
                 price_update_event.set()
                 if initial_update:
@@ -1346,6 +1449,90 @@ def update_price_history(state: ThreadSafeState) -> None:
         except Exception as e:
             logger.error(f"❌ Error in price update: {str(e)}")
             time.sleep(1)
+
+def calculate_rsi(prices: List[float], period: int = RSI_PERIOD) -> Optional[float]:
+    """Calculate Relative Strength Index (RSI)"""
+    if len(prices) < period + 1:
+        return None
+        
+    gains = []
+    losses = []
+    
+    for i in range(1, len(prices)):
+        delta = prices[i] - prices[i-1]
+        if delta > 0:
+            gains.append(delta)
+            losses.append(0)
+        else:
+            gains.append(0)
+            losses.append(abs(delta))
+            
+
+    # Simple average for first period
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    
+    # Calculate for the rest using Wilder's Smoothing
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    
+    if avg_loss == 0:
+        return 100.0
+        
+    rs = avg_gain / avg_loss
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    return rsi
+
+def calculate_sma(prices: List[float], period: int = SMA_PERIOD) -> Optional[float]:
+    """Calculate Simple Moving Average (SMA)"""
+    if len(prices) < period:
+        return None
+    return sum(prices[-period:]) / period
+
+def monitor_balance(state: ThreadSafeState) -> None:
+    """Background thread to monitor USDC balance"""
+    last_log_time = 0
+    
+    # Initialize connection and contract once
+    try:
+        settings = read_env_file()
+        proxy_wallet = settings.get('YOUR_PROXY_WALLET')
+        
+        if not proxy_wallet:
+            logger.error("❌ Cannot monitor balance: YOUR_PROXY_WALLET not set")
+            return
+
+        usdc_contract = web3.eth.contract(address=USDC_CONTRACT_ADDRESS, abi=[
+            {"name": "balanceOf", "outputs": [{"name": "", "type": "uint256"}], "type": "function"} 
+        ])
+        
+        logger.info(f"💰 Balance monitoring started for {proxy_wallet}")
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize balance monitor: {e}")
+        return
+
+    while not state.is_shutdown():
+        try:
+            # Check balance every 30 seconds
+            # Fetch balance
+            balance_wei = usdc_contract.functions.balanceOf(proxy_wallet).call()
+            balance_usdc = balance_wei / 10**6
+            
+            # Update state
+            state.update_balance(balance_usdc)
+            
+            # Log periodically (every 5 mins)
+            if time.time() - last_log_time > 300:
+                logger.info(f"💰 Current Balance: ${balance_usdc:.2f}")
+                last_log_time = time.time()
+                    
+            time.sleep(30)
+            
+        except Exception as e:
+            logger.error(f"❌ Error checking balance: {e}")
+            time.sleep(60)
 
 def detect_and_trade(state: ThreadSafeState) -> None:
     last_log_time = time.time()
@@ -1416,6 +1603,36 @@ def detect_and_trade(state: ThreadSafeState) -> None:
                                 continue
 
                             if delta > 0 and not is_recently_bought(state, asset_id):
+                                # Smart Trading Logic
+                                if ENABLE_SMART_TRADING:
+                                    # Get prices for indicators
+                                    prices = [p[1] for p in history]
+                                    
+                                    # 1. RSI Check (Overbought)
+                                    rsi = calculate_rsi(prices)
+                                    if rsi is not None and rsi > 70:
+                                        logger.info(f"🛑 SKIP BUY [{market_name}] RSI Overbought ({rsi:.1f} > 70)")
+                                        continue
+                                        
+                                    # 2. DMA/Trend Check
+                                    sma = calculate_sma(prices)
+                                    trend_modifier = 0
+                                    if sma is not None:
+                                        if new_price > sma:
+                                            # Uptrend - slightly more aggressive
+                                            trend_modifier = -0.005 # Reduce threshold by 0.5%
+                                            logger.debug(f"📈 Uptrend detected for {market_name} (Price ${new_price:.3f} > SMA ${sma:.3f})")
+                                        else:
+                                            # Downtrend - more conservative
+                                            trend_modifier = 0.01  # Increase threshold by 1%
+                                            logger.debug(f"📉 Downtrend detected for {market_name} (Price ${new_price:.3f} < SMA ${sma:.3f})")
+                                    
+                                    effective_threshold = SPIKE_THRESHOLD + trend_modifier
+                                    
+                                    if abs(delta) < effective_threshold:
+                                        logger.info(f"✋ SKIP BUY [{market_name}] Spike +{delta:.1%} below smart threshold {effective_threshold:.1%}")
+                                        continue
+
                                 logger.info(f"📈 SPIKE UP [{market_name}] +{delta:.1%} | ${old_price:.2f} → ${new_price:.2f}")
                                 logger.info(f"🟢 BUY SIGNAL [{market_name}] Price rising, attempting purchase...")
                                 if place_buy_order(state, asset_id, f"Spike +{delta:.1%}"):
@@ -1795,6 +2012,37 @@ def main() -> None:
         spinner.succeed("Initialized successfully")
         logger.info(f"🚀 Spike-detection bot started at {time.strftime('%Y-%m-%d %H:%M:%S')}")
         notification_manager.send_startup()
+
+        # Perform comprehensive startup health check
+        logger.info("🏥 Performing Startup Health Check...")
+        try:
+            if not web3.is_connected():
+                logger.error("❌ Failed to connect to Polygon RPC!")
+            else:
+                block = web3.eth.block_number
+                logger.info(f"✅ Connected to Polygon (Block: {block})")
+
+            # Check Signer MATIC Balance
+            if BOT_TRADER_ADDRESS:
+                matic_balance = web3.eth.get_balance(BOT_TRADER_ADDRESS) / 10**18
+                if matic_balance < 0.1:
+                    logger.warning(f"⚠️ Low MATIC Balance: {matic_balance:.4f} MATIC (Gas might fail)")
+                else:
+                    logger.info(f"✅ Signer MATIC Balance: {matic_balance:.4f} MATIC")
+
+            # Check Proxy USDC Balance
+            if YOUR_PROXY_WALLET:
+                usdc_contract = web3.eth.contract(address=USDC_CONTRACT_ADDRESS, abi=[
+                    {"constant": True, "inputs": [{"name": "account", "type": "address"}],
+                     "name": "balanceOf", "outputs": [{"name": "", "type": "uint256"}],
+                     "payable": False, "stateMutability": "view", "type": "function"}
+                ])
+                usdc_balance = usdc_contract.functions.balanceOf(YOUR_PROXY_WALLET).call() / 10**6
+                logger.info(f"✅ Proxy USDC Balance: ${usdc_balance:.2f} (Ready to trade)")
+        except Exception as e:
+            logger.error(f"❌ Health Check Error: {e}") 
+        
+        logger.info("✅ Health Check Complete - System Ready")
         
         # Check for orphans
         sync_orphan_positions(state)
@@ -1880,6 +2128,8 @@ def main() -> None:
                 thread_function_map = {
                     "price_update": update_price_history,
                     "detect_trade": detect_and_trade,
+                    "monitor_balance": monitor_balance
+                }
                     "check_exits": check_trade_exits
                 }
                 for name, thread in thread_manager.threads.items():
