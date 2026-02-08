@@ -467,6 +467,17 @@ class ThreadSafeState:
         with self._price_history_lock:
             return list(self._price_history.keys())
 
+    def get_asset_info(self, asset_id: str) -> tuple:
+        """Get eventslug and outcome for an asset from price history"""
+        with self._price_history_lock:
+            history = self._price_history.get(asset_id)
+            if history and len(history) > 0:
+                # Price history format: (timestamp, price, eventslug, outcome)
+                latest = history[-1]
+                if len(latest) >= 4:
+                    return latest[2], latest[3]  # eventslug, outcome
+            return None, None
+
     def get_active_trades(self) -> Dict[str, TradeInfo]:
         with self._active_trades_lock:
             return dict(self._active_trades)
@@ -896,21 +907,24 @@ def place_buy_order(state: ThreadSafeState, asset: str, reason: str) -> bool:
 
                 min_ask_data = get_min_ask_data(asset)
                 if min_ask_data is None:
-                    logger.warning(f"❌ The {asset} is not tradable, Skipping...")
+                    market_name = format_market_name(state, asset)
+                    logger.warning(f"⛔ SKIP BUY [{market_name}] No order book data - market may be illiquid or closed")
                     return False
 
                 min_ask_price = float(min_ask_data["min_ask_price"])
                 min_ask_size = float(min_ask_data["min_ask_size"])
+                market_name = format_market_name(state, asset)
                 
                 # Check liquidity requirement
-                if min_ask_size * min_ask_price < MIN_LIQUIDITY_REQUIREMENT:
-                    logger.warning(f"🔒 Insufficient liquidity for {asset}. Required: ${MIN_LIQUIDITY_REQUIREMENT}, Available: ${min_ask_size * min_ask_price:.2f}")
+                available_liquidity = min_ask_size * min_ask_price
+                if available_liquidity < MIN_LIQUIDITY_REQUIREMENT:
+                    logger.warning(f"💧 SKIP BUY [{market_name}] Low liquidity: ${available_liquidity:.2f} available (need ${MIN_LIQUIDITY_REQUIREMENT})")
                     return False
 
                 # Calculate slippage as percentage
                 slippage_pct = (min_ask_price - current_price) / current_price if current_price > 0 else 0
                 if slippage_pct > SLIPPAGE_TOLERANCE:
-                    logger.warning(f"🔐 Slippage tolerance exceeded for {asset}. Slippage: {slippage_pct:.2%}, Tolerance: {SLIPPAGE_TOLERANCE:.2%}")
+                    logger.warning(f"📊 SKIP BUY [{market_name}] Slippage too high: {slippage_pct:.1%} (max {SLIPPAGE_TOLERANCE:.1%})")
                     return False
 
                 # Check Spread
@@ -921,10 +935,10 @@ def place_buy_order(state: ThreadSafeState, asset: str, reason: str) -> bool:
                         if bid_price > 0:
                             spread = (min_ask_price - bid_price) / bid_price
                             if spread > MAX_SPREAD:
-                                logger.warning(f"📉 Spread too high for {asset}: {spread:.2%}. Limit: {MAX_SPREAD:.2%}")
+                                logger.warning(f"📊 SKIP BUY [{market_name}] Spread too wide: {spread:.1%} (max {MAX_SPREAD:.1%})")
                                 return False
                 except Exception as e:
-                    logger.warning(f"⚠️ Failed to check spread for {asset}: {e}")
+                    logger.warning(f"⚠️ Could not check spread for [{market_name}]: {e}")
 
 
 
@@ -1029,11 +1043,13 @@ def place_sell_order(state: ThreadSafeState, asset: str, reason: str) -> bool:
 
                 max_bid_data = get_max_bid_data(asset)
                 if max_bid_data is None:
-                    logger.warning(f"❌ The {asset} is not tradable, Skipping...")
+                    market_name = format_market_name(state, asset)
+                    logger.warning(f"⛔ SKIP SELL [{market_name}] No order book data - market may be illiquid or closed")
                     return False
 
                 max_bid_price = float(max_bid_data["max_bid_price"])
                 max_bid_size = float(max_bid_data["max_bid_size"])
+                market_name = format_market_name(state, asset)
 
                 # Initialize variables with defaults to avoid undefined variable errors
                 balance = 0
@@ -1054,21 +1070,21 @@ def place_sell_order(state: ThreadSafeState, asset: str, reason: str) -> bool:
                         break
 
                 if not position_found:
-                    logger.warning(f"🙄 No position found for {asset}, Skipping...")
+                    logger.warning(f"📭 SKIP SELL [{market_name}] You don't own any shares")
                     return False
 
                 if sell_amount_in_shares < 1:
-                    logger.warning(f"🙄 No shares to sell for {asset} (balance: {balance}, min keep: {KEEP_MIN_SHARES}), Skipping...")
+                    logger.warning(f"📭 SKIP SELL [{market_name}] Only {balance:.1f} shares (keeping minimum {KEEP_MIN_SHARES})")
                     return False
 
                 slippage = current_price - max_bid_price
                 # Fixed: avg_price > max_bid_price means we're selling below entry = LOSS
                 if avg_price > max_bid_price:
                     loss_amount = sell_amount_in_shares * (avg_price - max_bid_price)
-                    logger.info(f"balance: {balance}, slippage: {slippage}----You will LOSE ${loss_amount:.2f}")
+                    logger.info(f"💰 SELL [{market_name}] {sell_amount_in_shares:.1f} shares | Entry: ${avg_price:.2f} → Exit: ${max_bid_price:.2f} | Est. Loss: ${loss_amount:.2f}")
                 else:
                     profit_amount = sell_amount_in_shares * (max_bid_price - avg_price)
-                    logger.info(f"balance: {balance}, slippage: {slippage}----You will EARN ${profit_amount:.2f}")
+                    logger.info(f"💰 SELL [{market_name}] {sell_amount_in_shares:.1f} shares | Entry: ${avg_price:.2f} → Exit: ${max_bid_price:.2f} | Est. Profit: ${profit_amount:.2f}")
 
                 order_args = MarketOrderArgs(
                     token_id=str(asset),
@@ -1160,6 +1176,18 @@ def find_position_by_asset(positions: dict, asset_id: str) -> Optional[PositionI
             if position.asset == asset_id:
                 return position
     return None
+
+def format_market_name(state: ThreadSafeState, asset_id: str) -> str:
+    """Format a readable market name from asset_id using cached info"""
+    eventslug, outcome = state.get_asset_info(asset_id)
+    if eventslug and outcome:
+        # Make eventslug more readable (replace hyphens, title case)
+        event_name = eventslug.replace('-', ' ').title()
+        # Truncate if too long
+        if len(event_name) > 30:
+            event_name = event_name[:27] + "..."
+        return f"{outcome} @ {event_name}"
+    return asset_id[:16] + "..." if len(asset_id) > 16 else asset_id
 
 class ThreadManager:
     def __init__(self, state: ThreadSafeState):
@@ -1336,15 +1364,19 @@ def detect_and_trade(state: ThreadSafeState) -> None:
                         
                         # Skip if either price is zero to prevent division by zero
                         if old_price == 0 or new_price == 0:
-                            logger.warning(f"⚠️ Skipping asset {asset_id} due to zero price - Old: ${old_price:.4f}, New: ${new_price:.4f}")
+                            market_name = format_market_name(state, asset_id)
+                            logger.warning(f"⚠️ SKIP [{market_name}] Bad price data (price is $0) - waiting for valid data")
                             continue
                             
                         delta = (new_price - old_price) / old_price
 
                         if abs(delta) > SPIKE_THRESHOLD:
+                            market_name = format_market_name(state, asset_id)
+                            
                             # Skip prices outside tradeable range
                             if new_price < 0.20 or new_price > 0.80:
-                                logger.debug(f"⚠️ Skipping {asset_id} - price ${new_price:.4f} outside range [0.20, 0.80]")
+                                reason = "too likely (>80%)" if new_price > 0.80 else "too unlikely (<20%)"
+                                logger.info(f"⏭️ SKIP [{market_name}] Price {reason} at ${new_price:.2f} - avoiding extreme odds")
                                 continue
 
                             opposite = state.get_asset_pair(asset_id)
@@ -1353,25 +1385,31 @@ def detect_and_trade(state: ThreadSafeState) -> None:
                                 continue
 
                             if delta > 0 and not is_recently_bought(state, asset_id):
-                                logger.info(f"🟨 Spike Detected | Asset: {asset_id} | Delta: {delta:.2%} | Price: ${new_price:.4f}")
-                                logger.info(f"🟢 Buy Signal | Asset: {asset_id} | Price: ${new_price:.4f}")
-                                if place_buy_order(state, asset_id, "Spike detected"):
+                                logger.info(f"📈 SPIKE UP [{market_name}] +{delta:.1%} | ${old_price:.2f} → ${new_price:.2f}")
+                                logger.info(f"🟢 BUY SIGNAL [{market_name}] Price rising, attempting purchase...")
+                                if place_buy_order(state, asset_id, f"Spike +{delta:.1%}"):
                                     # Only try opposite sell if we have shares to sell
                                     opposite_position = find_position_by_asset(positions_copy, opposite)
                                     if opposite_position and opposite_position.shares > KEEP_MIN_SHARES:
-                                        place_sell_order(state, opposite, "Opposite trade")
+                                        opposite_name = format_market_name(state, opposite)
+                                        logger.info(f"🔄 HEDGE [{opposite_name}] Selling opposite position")
+                                        place_sell_order(state, opposite, "Hedge opposite")
                                     else:
-                                        logger.info(f"🟡 Skipping opposite sell - no shares for {opposite}")
+                                        opposite_name = format_market_name(state, opposite)
+                                        logger.info(f"ℹ️ NO HEDGE [{opposite_name}] No shares owned to hedge")
                             elif delta < 0 and not is_recently_sold(state, asset_id):
-                                logger.info(f"🟨 Spike Detected | Asset: {asset_id} | Delta: {delta:.2%} | Price: ${new_price:.4f}")
-                                logger.info(f"🔴 Sell Signal | Asset: {asset_id} | Price: ${new_price:.4f}")
+                                logger.info(f"📉 SPIKE DOWN [{market_name}] {delta:.1%} | ${old_price:.2f} → ${new_price:.2f}")
                                 # Only try to sell if we have shares
                                 current_position = find_position_by_asset(positions_copy, asset_id)
                                 if current_position and current_position.shares > KEEP_MIN_SHARES:
-                                    if place_sell_order(state, asset_id, "Spike detected"):
-                                        place_buy_order(state, opposite, "Opposite trade")
+                                    logger.info(f"🔴 SELL SIGNAL [{market_name}] Price dropping, selling {current_position.shares:.1f} shares...")
+                                    if place_sell_order(state, asset_id, f"Spike {delta:.1%}"):
+                                        opposite_name = format_market_name(state, opposite)
+                                        logger.info(f"🔄 HEDGE [{opposite_name}] Buying opposite position")
+                                        place_buy_order(state, opposite, "Hedge opposite")
                                 else:
-                                    logger.info(f"🟡 Skipping sell - no shares for {asset_id}")
+                                    shares_owned = current_position.shares if current_position else 0
+                                    logger.info(f"ℹ️ SKIP SELL [{market_name}] Only {shares_owned:.1f} shares (keeping min {KEEP_MIN_SHARES})")
 
                     except IndexError:
                         logger.debug(f"⏳ Building price history for {asset_id}")
@@ -1422,25 +1460,27 @@ def check_trade_exits(state: ThreadSafeState) -> None:
                     remaining_shares = position.shares
                     cash_profit = (current_price - avg_price) * remaining_shares
                     pct_profit = (current_price - avg_price) / avg_price
+                    market_name = format_market_name(state, asset_id)
+                    holding_time = current_time - last_traded
                     
                     # Check holding time limit FIRST
-                    if current_time - last_traded > HOLDING_TIME_LIMIT:
-                        logger.info(f"⏰ Holding Time Limit Hit | Asset: {asset_id} | Holding Time: {current_time - last_traded:.2f} seconds | Time: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-                        if place_sell_order(state, asset_id, "Holding time limit"):
+                    if holding_time > HOLDING_TIME_LIMIT:
+                        logger.info(f"⏰ TIME LIMIT [{market_name}] Held {holding_time:.0f}s (max {HOLDING_TIME_LIMIT:.0f}s) - auto-selling")
+                        if place_sell_order(state, asset_id, f"Held {holding_time:.0f}s"):
                             state.remove_active_trade(asset_id)
                             state.set_last_trade_time(time.time())
                     
                     # Check take profit (use elif to avoid double-sell)
                     elif cash_profit >= CASH_PROFIT or pct_profit > PCT_PROFIT:
-                        logger.info(f"🎯 Take Profit Hit | Asset: {asset_id} | Profit: ${cash_profit:.2f} ({pct_profit:.2%}) | Time: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-                        if place_sell_order(state, asset_id, "Take profit"):
+                        logger.info(f"🎯 TAKE PROFIT [{market_name}] +${cash_profit:.2f} (+{pct_profit:.1%}) - target reached!")
+                        if place_sell_order(state, asset_id, f"Profit +${cash_profit:.2f}"):
                             state.remove_active_trade(asset_id)
                             state.set_last_trade_time(time.time())
 
                     # Check stop loss (use elif to avoid double-sell)
                     elif cash_profit <= CASH_LOSS or pct_profit < PCT_LOSS:
-                        logger.info(f"🔴 Stop Loss Hit | Asset: {asset_id} | Loss: ${cash_profit:.2f} ({pct_profit:.2%}) | Time: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-                        if place_sell_order(state, asset_id, "Stop loss"):
+                        logger.info(f"🛑 STOP LOSS [{market_name}] -${abs(cash_profit):.2f} ({pct_profit:.1%}) - cutting losses")
+                        if place_sell_order(state, asset_id, f"Stop loss -${abs(cash_profit):.2f}"):
                             state.remove_active_trade(asset_id)
                             state.set_last_trade_time(time.time())
 
